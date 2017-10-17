@@ -10,11 +10,12 @@ from .utils import PROCESS_TERMINATED, PROCESS_NOEXIST
 
 
 class DMProcess:
-    def __init__(self, app, log_queue):
+    def __init__(self, app, log_queue, inject_environment={}):
         self.thread = None
 
         self.app = app
         self.log_queue = log_queue
+        self.inject_environment = inject_environment
 
         self.run(init=True)
 
@@ -41,6 +42,9 @@ class DMProcess:
             del env['VIRTUAL_ENV']
 
         env['PYTHONUNBUFFERED'] = '1'
+
+        for key, value in self.inject_environment.items():
+            env[key] = value
 
         return env
 
