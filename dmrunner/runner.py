@@ -10,6 +10,7 @@ import itertools
 import json
 import multiprocessing
 import os
+import pexpect
 import prettytable
 import psutil
 import re
@@ -23,6 +24,7 @@ import sys
 import time
 import threading
 from urllib.parse import urljoin
+import yaml
 
 from .process import DMProcess
 from .utils import get_app_name, PROCESS_TERMINATED, PROCESS_NOEXIST
@@ -33,6 +35,7 @@ TERMINAL_ESCAPE_CLEAR_LINE = '\033[K'
 
 class DMRunner:
     INPUT_STRING = 'Enter command (or H for help): '
+    MFA_CODE_STRING = 'Enter MFA code for credentials decryption (or A to abort): '
 
     NGINX_CONFIG_FILE = '/usr/local/etc/nginx/nginx.conf'
     CURR_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -42,16 +45,34 @@ class DMRunner:
 
     COMPILED_API_REPO_PATTERN = re.compile(r'^digitalmarketplace-(?:.+)?api$')
     COMPILED_FRONTEND_REPO_PATTERN = re.compile(r'^digitalmarketplace-.*-frontend$')
+    CREDENTIALS_REPO_PATTERNS = re.compile(r'^digitalmarketplace-(?:aws|credentials)$')
+    DM_ENV_LOGGING_PATTERN = re.compile(r'^DM_[A-Z_]+=.*$')
+
     DM_REPO_PATTERNS = [COMPILED_API_REPO_PATTERN, COMPILED_FRONTEND_REPO_PATTERN]
+    DM_DOWNLOAD_REPO_PATTERNS = [CREDENTIALS_REPO_PATTERNS, COMPILED_API_REPO_PATTERN, COMPILED_FRONTEND_REPO_PATTERN]
+
+    CREDENTIALS_TO_INJECT = {
+        'DM_NOTIFY_API_KEY': lambda x: x['notify_api_key'],
+        'SECRET_KEY': lambda x: x['shared_tokens']['password_key'],
+        'SHARED_EMAIL_KEY': lambda x: x['shared_tokens']['shared_email_key'],
+        'DM_MANDRILL_API_KEY': lambda x: x['shared_tokens']['mandrill_key'],
+        'DM_CLARIFICATION_QUESTION_EMAIL': lambda x: x['supplier_frontend']['clarification_question_email'],
+        'DM_FOLLOW_UP_EMAIL_TO': lambda x: x['supplier_frontend']['follow_up_email_to'],
+        'DM_MAILCHIMP_USERNAME': lambda x: x['supplier_frontend']['mailchimp_username'],
+        'DM_MAILCHIMP_API_KEY': lambda x: x['supplier_frontend']['mailchimp_api_key'],
+        'DM_MAILCHIMP_OPEN_FRAMEWORK_NOTIFICATION_MAILING_LIST_ID':
+            lambda x: x['supplier_frontend']['mailchimp_open_framework_notification_mailing_list_id'],
+    }
 
     HELP_SYNTAX = """
- h /     help - Display this help file.
+ h /     help - Display this help file.\n
  s /   status - Check status for your apps.
  b /   branch - Check which branches your apps are running against.
+ f /   filter - Start showing logs only from specified apps*\n
+ c /    creds - Load keys and tokens from digitalmarketplace-credentials (will restart all apps).\n
  r /  restart - Restart any apps that have gone down (using `make run-app`).
 rm /   remake - Restart any apps that have gone down (using `make run-all`).
- f /   filter - Start showing logs only from specified apps*
-fe / frontend - Run `make frontend-build` against specified apps*
+fe / frontend - Run `make frontend-build` against specified apps*\n
  k /     kill - Kill specified apps*
  q /     quit - Terminate all running apps and quit back to your shell.
 
@@ -98,6 +119,8 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         signal.signal(signal.SIGINT, curr_signal)  # Probably a race condition?
 
+        self._decrypting_credentials = False
+        self._credentials = {}
         self._processes = {}
         self._repositories = self._get_repository_directories()
         self._populate_multiprocessing_components()
@@ -106,6 +129,10 @@ fe / frontend - Run `make frontend-build` against specified apps*
         self._awaiting_input = False
         self._suppress_log_printing = False
         self._filter_logs = []
+
+        atexit.register(self.cmd_kill_apps, silent_fail=True)
+
+        self._environment = {}
 
         self.log_processor_shutdown = threading.Event()
         self.log_thread = threading.Thread(target=self._process_logs, daemon=True, name='Thread-Logging')
@@ -334,7 +361,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
             repos = json.loads(res.text)
             for repo in repos:
-                for pattern in DMRunner.DM_REPO_PATTERNS:
+                for pattern in DMRunner.DM_DOWNLOAD_REPO_PATTERNS:
                     if pattern.match(repo['name']):
                         app_name = get_app_name(repo['name'])
                         self.print_out('Found {} '.format(app_name))
@@ -352,12 +379,21 @@ fe / frontend - Run `make frontend-build` against specified apps*
         style_string = ''.join(getattr(colored, key)(val) for key, val in styles.items())
         return colored.stylize(text, style_string)
 
+    def _prompt(self):
+        if self._decrypting_credentials:
+            return DMRunner.MFA_CODE_STRING
+
+        return DMRunner.INPUT_STRING
+
     def print_out(self, msgs, app_name='manager'):
         if self._awaiting_input:
             # We've printed a prompt - let's overwrite it.
             sys.stdout.write('{}{}'.format(TERMINAL_CARRIAGE_RETURN, TERMINAL_ESCAPE_CLEAR_LINE))
 
         for msg in msgs.split('\n'):
+            if DMRunner.DM_ENV_LOGGING_PATTERN.match(msg):
+                continue
+
             datetime_prefixed_log_pattern = r'^\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}\s{}\s'.format(app_name)
 
             if re.match(datetime_prefixed_log_pattern, msg):
@@ -385,20 +421,18 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         if self._awaiting_input and not self._shutdown:
             # We cleared the prompt before dispalying the log line; we should show the prompt (and any input) again.
-            sys.stdout.write('{}{}'.format(DMRunner.INPUT_STRING, readline.get_line_buffer()))
+            sys.stdout.write('{}{}'.format(self._prompt(), readline.get_line_buffer()))
             sys.stdout.flush()
 
     def run_single_repository(self, app):
         # We are here if the script is booting up. If run_all was supplied, we should run-all for the initial run.
-        self._processes[app['name']] = DMProcess(app, self.log_queue)
+        self._processes[app['name']] = DMProcess(app, self.log_queue, inject_environment=self._environment)
 
         if app['rebuild']:
             self.print_out('Running {}-build...'.format(self._stylize(app['name'], attr='bold')))
             # self._processes['{}-build'.format(app['name'])] = DMProcess(app, log_queue)
 
     def run(self):
-        atexit.register(self.cmd_kill_apps, silent_fail=True)
-
         try:
             if self.download:
                 self._download_repos()
@@ -426,7 +460,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
         self.process_input()
 
 
-    def cmd_switch_logs(self, selectors):
+    def cmd_switch_logs(self, selectors=''):
         if not selectors:
             self._filter_logs = []
             self.print_out('New logs coming in from all apps will be interleaved together.\n\n')
@@ -495,7 +529,67 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         self.print_out(branches_table.get_string())
 
-    def cmd_restart_down_apps(self, selectors, remake=False):
+    def cmd_load_credentials(self):
+        self._decrypting_credentials = True
+        decrypted_credentials = {}
+
+        def sops_env():
+            sops_env = os.environ.copy()
+            sops_env['AWS_PROFILE'] = 'sops'
+            return sops_env
+
+        creds_dir = os.path.join(DMRunner.REPO_DIR, 'digitalmarketplace-credentials')
+
+        def spawn_creds_process():
+            return pexpect.spawn(f'{creds_dir}/sops-wrapper -d vars/preview.yaml', cwd=creds_dir, env=sops_env(),
+                                 encoding='utf-8')
+
+        creds_process = spawn_creds_process()
+
+        while not creds_process.terminated:
+            idx = creds_process.expect(['Enter MFA code:',
+                                        'MultiFactorAuthentication failed with invalid MFA one time pass code.',
+                                        'Member must have length less than or equal to 6',
+                                        'Invalid length for parameter TokenCode',
+                                        pexpect.EOF])
+
+            if idx == 0:
+                mfa_code = input(DMRunner.MFA_CODE_STRING).lower()
+                if mfa_code == 'a' or mfa_code == 'abort' or mfa_code == 'q' or mfa_code == 'quit':
+                    creds_process.terminate()
+                    break
+
+                creds_process.sendline(mfa_code)
+
+            elif idx >= 1 and idx <= 3:
+                self.print_out('Could not decrypt credentials using supplied MFA token. Please try again.')
+                creds_process = spawn_creds_process()
+
+            else:
+                try:
+                    output = creds_process.before
+                    decrypted_credentials = yaml.load(output)
+
+                except yaml.YAMLError as e:
+                    self.print_out('Could not decode credentials: {}\n\n{}'.format(e, output))
+
+                break
+
+        # We want to grab some preview credentials to use for our local setup, e.g. to send emails with, so functional
+        # tests run on development machines. Grab these here.
+
+        self._decrypting_credentials = False
+
+        if decrypted_credentials:
+            self._credentials = decrypted_credentials
+
+            for key, getter in DMRunner.CREDENTIALS_TO_INJECT.items():
+                self._environment.update({key: getter(decrypted_credentials)})
+
+            self.cmd_kill_apps()
+            self.cmd_restart_down_apps()
+
+    def cmd_restart_down_apps(self, selectors='', remake=False):
         matched_apps = self._find_matching_apps(selectors)
         recovered_apps = set()
         failed_apps = set()
@@ -573,7 +667,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
                     self.config['styles'][app_build_name] = self.config['styles'].get(app_name)
 
                 # Ephemeral process to run the frontend-build. Not tracked.
-                DMProcess(app_build, self.log_queue)
+                DMProcess(app_build, self.log_queue, inject_environment=self._environment)
 
             self.print_out('Starting frontend-build on {} '.format(app_name))
 
@@ -589,7 +683,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
                     return
 
                 self._awaiting_input = True
-                command = input(DMRunner.INPUT_STRING).lower().strip()
+                command = input(self._prompt()).lower().strip()
                 self._awaiting_input = False
 
                 words = command.split(' ')
@@ -604,6 +698,9 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
                 elif verb == 'b' or verb == 'branch' or verb == 'branches':
                     self.cmd_apps_branches()
+
+                elif verb == 'c' or verb == 'creds' or verb == 'credentials':
+                    self.cmd_load_credentials()
 
                 elif verb == 'r' or verb == 'restart':
                     self.cmd_restart_down_apps(words[1:])
