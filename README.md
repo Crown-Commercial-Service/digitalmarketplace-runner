@@ -7,7 +7,7 @@ simply type `make` to run all your checked out apps.
 ## Prerequisites / Assumptions
 * You have a pre-existing development environment, including eg:
   * Python 3 (with headers) installed globally with `pip` and `virtualenv` packages.
-  * Backend services installed and running (as of writing: postgresql-9.6, elasticsearch-1.7, nginx, nodejs)
+  * Backend services installed and running (as of writing: postgresql-9.5, elasticsearch-5.4.2, nginx, nodejs)
   * Other dependencies with headers as appropriate (openssl, libssl-dev, libxml2-dev, libxslt-dev, libffi-dev,
     libyaml-dev, lib32ncurses-dev, postgresql-server-dev). Others may be required.
   * Postgres populated with development data from Google Drive.

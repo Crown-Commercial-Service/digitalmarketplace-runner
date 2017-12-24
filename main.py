@@ -5,7 +5,6 @@ from dmrunner.runner import DMRunner
 
 """
 TODO:
-* old repos without run-all break everything
 * nginx bootstrapping
 * Proper logging
 * Implement --rebuild to run secondary processes for frontend-build:watch on frontend apps
@@ -19,16 +18,18 @@ TODO:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--manifest', '-m', help='Specify the location of the manifest file to use for detecting and'
+                                                 'running services and applications (default: manifest.yml).')
+    parser.add_argument('--command', '-c', help='Override the command used from the manifest for running apps '
+                                                '(default: run).')
+    parser.add_argument('--checkout-directory', default='./code', help='The directory in which to checkout required '
+                                                                       'code from source control (default=./code).')
     parser.add_argument('--download', action='store_true', help='Download main digitalmarketplace repositories.')
-    parser.add_argument('--all', '-a', action='store_true', help='Use `run-all` for each repo rather than `run-app`.')
-    parser.add_argument('--rebuild', '-r', action='store_true', help='Also run frontend-build:watch for frontend '
-                                                                     'repositories.')
-    parser.add_argument('--nix', action='store_true', help='Run all apps inside their respective nix-shell '
-                                                           'environments.')
 
     args = parser.parse_args()
 
-    runner = DMRunner(download=args.download, run_all=args.all, rebuild=args.rebuild, nix=args.nix)
+    runner = DMRunner(manifest=args.manifest, command=args.command, checkout_dir=args.checkout_directory,
+                      download=args.download)
     runner.run()
 
 

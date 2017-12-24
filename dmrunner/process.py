@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
 
+import ansicolor
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -31,6 +33,9 @@ class DMProcess:
         if self.app['nix']:
             # TODO: Git fails to find cacerts on mac when run through nix-shell. Remove env hack when that is fixed.
             command = ['nix-shell', '--pure', '--run', 'GIT_SSL_NO_VERIFY="true" {}'.format(' '.join(command)), '.']
+        elif self.app['docker']:
+            command = ['docker-compose', '-f', '/Users/samuelwilliams/git/digitalmarketplace-functional-tests/docker-compose.yml',
+                       'up', self.app['name']]
 
         return tuple([command, {} if self.app['nix'] else {'shell': True}])
 
@@ -41,6 +46,7 @@ class DMProcess:
             del env['VIRTUAL_ENV']
 
         env['PYTHONUNBUFFERED'] = '1'
+        env['DM_DEVELOPMENT_REPO'] = 'Users/samuelwilliams/git/dmrunner/code/digitalmarketplace-api'
 
         return env
 
@@ -48,7 +54,7 @@ class DMProcess:
         self.log_queue.put({'name': self.app['name'], 'log': log_entry.strip('\n')})
 
     def _run_in_thread(self, run_cmd, popen_args):
-        app_instance = subprocess.Popen(run_cmd, cwd=self.app['repo_path'], env=self._get_clean_env(),
+        app_instance = subprocess.Popen(' '.join(run_cmd), cwd=self.app['repo_path'], env=self._get_clean_env(),
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
                                         bufsize=1, start_new_session=True, **popen_args)
 
@@ -57,6 +63,10 @@ class DMProcess:
         try:
             while True:
                 log_entry = app_instance.stdout.readline()
+
+                if self.app['docker']:
+                    log_entry = re.sub(r'^[^|]+\s+\|\s+', '', ansicolor.strip_escapes(log_entry))
+
                 self.log(log_entry)
 
                 if app_instance.poll() is not None:

@@ -4,7 +4,7 @@ VIRTUALENV_ROOT := $(shell [ -z $$VIRTUAL_ENV ] && echo $$(pwd)/venv || echo $$V
 
 .PHONY: virtualenv
 virtualenv:
-	[ -z $$VIRTUAL_ENV ] && [ ! -d venv ] && virtualenv -p python3 venv || true
+	[ -z $$VIRTUAL_ENV ] && [ ! -d venv ] && python3 -m venv venv || true
 
 .PHONY: install
 install: virtualenv
@@ -19,7 +19,7 @@ download: install
 	${VIRTUALENV_ROOT}/bin/python main.py --download
 
 .PHONY: run
-run: install
+run:
 	${VIRTUALENV_ROOT}/bin/python main.py ${ARGS}
 
 .PHONY: all

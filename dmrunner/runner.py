@@ -7,6 +7,7 @@ import configparser
 import datetime
 import errno
 import itertools
+from http.client import RemoteDisconnected
 import json
 import multiprocessing
 import os
@@ -16,6 +17,7 @@ import re
 import readline
 from reconfigure.parsers import NginxParser
 import requests
+from requests.exceptions import ConnectionError
 import shutil
 import signal
 import subprocess
@@ -23,6 +25,7 @@ import sys
 import time
 import threading
 from urllib.parse import urljoin
+import yaml
 
 from .process import DMProcess
 from .utils import get_app_name, PROCESS_TERMINATED, PROCESS_NOEXIST
@@ -34,15 +37,8 @@ TERMINAL_ESCAPE_CLEAR_LINE = '\033[K'
 class DMRunner:
     INPUT_STRING = 'Enter command (or H for help): '
 
-    NGINX_CONFIG_FILE = '/usr/local/etc/nginx/nginx.conf'
     CURR_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    REPO_DIR = os.path.dirname(CURR_DIR)
-    CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.dmrunner')
     LOGGING_DIR = os.path.join(CURR_DIR, 'logs')
-
-    COMPILED_API_REPO_PATTERN = re.compile(r'^digitalmarketplace-(?:.+)?api$')
-    COMPILED_FRONTEND_REPO_PATTERN = re.compile(r'^digitalmarketplace-.*-frontend$')
-    DM_REPO_PATTERNS = [COMPILED_API_REPO_PATTERN, COMPILED_FRONTEND_REPO_PATTERN]
 
     HELP_SYNTAX = """
  h /     help - Display this help file.
@@ -58,36 +54,20 @@ fe / frontend - Run `make frontend-build` against specified apps*
             * - Specify apps as a space-separator partial match on the name, e.g. 'buy search' to match the
                 buyer-frontend and the search-api. If no match string is supplied, all apps will match."""
 
-    DEFAULT_CONFIG_STYLES = {
-        'api': {'fg': 'blue', 'attr': 'bold'},
-        'search-api': {'fg': 'cyan', 'attr': 'bold'},
-        'admin-frontend': {'fg': 'green', 'attr': 'bold'},
-        'brief-responses-frontend': {'fg': 'yellow', 'attr': 'bold'},
-        'briefs-frontend': {'fg': 'red', 'attr': 'bold'},
-        'buyer-frontend': {'fg': 'magenta', 'attr': 'bold'},
-        'supplier-frontend': {'fg': 'white', 'attr': 'bold'},
-        'user-frontend': {'fg': 'dark_orange_3b', 'attr': 'bold'},
-    }
+    def __init__(self, manifest, command, checkout_dir='./code', download=False):
+        self._manifest = os.path.realpath(manifest)
+        self._command = command
+        self._checkout_dir = os.path.realpath(checkout_dir)
+        self._download = download
 
-    def __init__(self, download=False, run_all=False, rebuild=False, nix=False):
-        self.download = download
-        self.run_all = run_all
-        self.rebuild = rebuild
-        self.nix = nix
+        with open(self._manifest) as manifest:
+            self.config = yaml.safe_load(manifest)
 
         try:
             os.makedirs(DMRunner.LOGGING_DIR)
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
-
-        try:
-            os.makedirs(DMRunner.CONFIG_DIR)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
-
-        self._load_config()
 
         curr_signal = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -108,7 +88,8 @@ fe / frontend - Run `make frontend-build` against specified apps*
         self._filter_logs = []
 
         self.log_processor_shutdown = threading.Event()
-        self.log_thread = threading.Thread(target=self._process_logs, daemon=True, name='Thread-Logging')
+        self.log_thread = threading.Thread(target=self._process_logs, name='Thread-Logging')
+        self.log_thread.setDaemon(True)
         self.log_thread.start()
 
         readline.parse_and_bind('tab: complete')
@@ -122,17 +103,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         return max(len(get_app_name(r)) for r in itertools.chain.from_iterable(self._repositories))
 
-    def _load_config(self):
-        config_file_path = os.path.join(DMRunner.CONFIG_DIR, 'config')
-
-        self.config = configparser.ConfigParser(converters={'dict': lambda x: ast.literal_eval(x)})
-        self.config['styles'] = DMRunner.DEFAULT_CONFIG_STYLES
-        self.config.read(config_file_path)
-
-        with open(config_file_path, 'w') as config_file:
-            self.config.write(config_file)
-
-    def _app_name_completer(text, state):
+    def _app_name_completer(self, text, state):
         options = [name for name in self.apps.keys() if text in name]
         if state < len(options):
             return options[state]
@@ -147,9 +118,10 @@ fe / frontend - Run `make frontend-build` against specified apps*
             app['name'] = app_name
             app['process'] = PROCESS_NOEXIST
             app['repo_path'] = repo
-            app['run_all'] = self.run_all
-            app['rebuild'] = self.rebuild
-            app['nix'] = self.nix
+            app['run_all'] = self._run_all
+            app['rebuild'] = self._rebuild
+            app['nix'] = self._nix
+            app['docker'] = self._docker
 
             self.apps[app_name] = app
 
@@ -163,8 +135,8 @@ fe / frontend - Run `make frontend-build` against specified apps*
             matched_repos = []
 
             directories = filter(lambda x: os.path.isdir(x),
-                                 map(lambda x: os.path.join(os.path.realpath('..'), x),
-                                     os.listdir('..')))
+                                 map(lambda x: os.path.join(self._checkout_dir, x),
+                                     os.listdir(self._checkout_dir)))
             for directory in directories:
 
                 if matcher.match(os.path.basename(directory)):
@@ -183,8 +155,12 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         except FileNotFoundError:
             try:
-                with open(os.path.join(DMRunner.REPO_DIR, 'digitalmarketplace-functional-tests',
-                                       'nginx', 'nginx.conf')) as infile:
+                with open(os.path.join(
+                    self._checkout_dir,
+                    'digitalmarketplace-functional-tests',
+                    'nginx',
+                    'nginx.conf'
+                )) as infile:
                     parser = NginxParser()
                     nginx_config = parser.parse(infile.read())
 
@@ -205,6 +181,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         while loop or not checked:
             if app['process'] == PROCESS_NOEXIST:
+                print('sleeping')
                 time.sleep(0.5)
                 continue
 
@@ -213,26 +190,49 @@ fe / frontend - Run `make frontend-build` against specified apps*
                 break
 
             else:
+                print('checking...')
                 try:
                     # Find ports bound by the above processes and check /_status endpoints.
-                    parent = psutil.Process(app['process'])
+                    if app['docker']:
+                        try:
+                            inspect_output = subprocess.check_output(['docker', 'inspect', app['name']])
+                            inspect_dict = json.loads(inspect_output)
+                            host_port = int(inspect_dict[0]['NetworkSettings']['Ports']['80/tcp'][0]['HostPort'])
+                            base_url = 'http://{}:{}'.format('localhost', host_port)
 
-                    child = parent.children()[0].children()[0] if app['nix'] else parent.children()[0]
+                        except (subprocess.CalledProcessError, KeyError):
+                            error_msg = 'Container not yet ready'
+                            time.sleep(0.5)
+                            continue
 
-                    valid_conns = list(filter(lambda x: x.status == 'LISTEN', child.connections()))[0]
+                        print(base_url)
 
-                    base_url = 'http://{}:{}'.format(*valid_conns.laddr)
-                    prefix = self._get_status_endpoint_prefix(valid_conns.laddr[1])
+                    else:
+                        parent = psutil.Process(app['process'])
+
+                        child = parent.children()[0].children()[0] if app['nix'] else parent.children()[0]
+
+                        valid_conns = list(filter(lambda x: x.status == 'LISTEN', child.connections()))[0]
+
+                        base_url = 'http://{}:{}'.format(*valid_conns.laddr)
+                        host_port = valid_conns.laddr[1]
+
+                    prefix = self._get_status_endpoint_prefix(host_port)
                     if prefix is None:
                         return 'unknown', {'message': 'Nginx configuration not detected'}
 
                     status_endpoint = urljoin(base_url, os.path.join(prefix, '_status'))
 
                     # self.print_out('Checking status for {} at {}'.format(app['name'], status_endpoint))
-                    res = requests.get(status_endpoint)
-                    data = json.loads(res.text)
+                    try:
+                        res = requests.get(status_endpoint)
+                        data = json.loads(res.text)
 
-                    return data['status'], data
+                        return data['status'], data
+
+                    except (RemoteDisconnected, ConnectionError):
+                        time.sleep(0.5)
+                        continue
 
                 except json.decoder.JSONDecodeError as e:
                     status = 'unknown'
@@ -342,7 +342,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         for repo_name, repo_details in matching_repos.items():
             self.print_out('Cloning {} ...'.format(repo_name))
-            retcode = subprocess.call(['git', 'clone', repo_details['url']], cwd=DMRunner.REPO_DIR)
+            retcode = subprocess.call(['git', 'clone', repo_details['url']], cwd=self._checkout_dir)
             if retcode != 0:
                 self.print_out('Problem cloning {} - errcode {}'.format(repo_name, retcode))
 
@@ -400,7 +400,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
         atexit.register(self.cmd_kill_apps, silent_fail=True)
 
         try:
-            if self.download:
+            if self._download:
                 self._download_repos()
                 return
 
