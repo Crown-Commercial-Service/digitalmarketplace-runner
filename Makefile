@@ -12,7 +12,7 @@ install: virtualenv
 
 .PHONY: uninstall
 uninstall:
-	${VIRTUALENV_ROOT}/bin/pip install dmrunner
+	${VIRTUALENV_ROOT}/bin/pip uninstall .
 
 .PHONY: download
 download: install

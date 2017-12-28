@@ -1,0 +1,173 @@
+version: '2'
+
+services:
+  nginx:
+    container_name: nginx
+    image: "digitalmarketplace/local-nginx:latest"
+    build:
+      context: ./
+      dockerfile: ./local-nginx.docker
+    ports:
+      - "80:80"
+
+  postgres:
+    container_name: postgres
+    image: "postgres:9.5"
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+
+  elasticsearch:
+    container_name: elasticsearch
+    image: "elasticsearch:5.4"
+    ports:
+      - "9200:9200"
+
+  api:
+    container_name: api
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/api:latest"
+    ports:
+      - "5000:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - SQLALCHEMY_DATABASE_URI=postgresql://dmdev:dmdevpasswd@postgres:5432/digitalmarketplace
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - "${DM_DEVELOPMENT_REPO}:/repo"
+    command: >
+      bash -c "/compose-scripts/wait-for-postgres.py && python application.py db upgrade
+      && python application.py runserver --host 0.0.0.0 --port 80"
+
+  search-api:
+    container_name: search-api
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/search-api:latest"
+    ports:
+      - "5001:80"
+    environment:
+      - COMPOSE_HTTP_TIMEOUT=5
+      - DM_ENVIRONMENT=development
+      - DM_ELASTICSEARCH_URL=http://elasticsearch:9200
+    volumes:
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c 'python application.py runserver --host 0.0.0.0 --port 80'
+
+  user-frontend:
+    container_name: user-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/user-frontend:latest"
+    ports:
+      - "5007:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - DM_NOTIFY_API_KEY=${DM_NOTIFY_API_KEY}
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'
+
+  buyer-frontend:
+    container_name: buyer-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/buyer-frontend:latest"
+    ports:
+      - "5002:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - DM_SEARCH_API_URL=http://search-api:80
+      - DM_MANDRILL_API_KEY=${DM_MANDRILL_API_KEY}
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'
+
+  briefs-frontend:
+    container_name: briefs-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/briefs-frontend:latest"
+    ports:
+      - "5005:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - DM_NOTIFY_API_KEY=${DM_NOTIFY_API_KEY}
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'
+
+  brief-responses-frontend:
+    container_name: brief-responses-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/brief-responses-frontend:latest"
+    ports:
+      - "5006:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - DM_MANDRILL_API_KEY=${DM_MANDRILL_API_KEY}
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'
+
+  supplier-frontend:
+    container_name: supplier-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/supplier-frontend:latest"
+    ports:
+      - "5003:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+      - DM_NOTIFY_API_KEY=${DM_NOTIFY_API_KEY}
+      - DM_MANDRILL_API_KEY=${DM_MANDRILL_API_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'
+
+  admin-frontend:
+    container_name: admin-frontend
+    stdin_open: true
+    tty: true
+    restart: always
+    image: "digitalmarketplace/admin-frontend:latest"
+    ports:
+      - "5004:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - DM_DATA_API_URL=http://api:80
+      - PROXY_AUTH_CREDENTIALS=dev-user:$$apr1$$rx3G14WQ$$I2zOn60wfMGCrxjC8NbdP0
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - DM_NOTIFY_API_KEY=${DM_NOTIFY_API_KEY}
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - ${DM_DEVELOPMENT_REPO}:/repo
+    command: bash -c '/compose-scripts/wait-for-api.sh && python application.py runserver --host 0.0.0.0 --port 80'

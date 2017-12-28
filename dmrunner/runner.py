@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import ast
 import atexit
 import colored
-import configparser
 import datetime
 import errno
 import itertools
@@ -15,7 +13,6 @@ import prettytable
 import psutil
 import re
 import readline
-from reconfigure.parsers import NginxParser
 import requests
 from requests.exceptions import ConnectionError
 import shutil
@@ -28,7 +25,7 @@ from urllib.parse import urljoin
 import yaml
 
 from .process import DMProcess
-from .utils import get_app_name, PROCESS_TERMINATED, PROCESS_NOEXIST
+from .utils import PROCESS_TERMINATED, PROCESS_NOEXIST
 
 TERMINAL_CARRIAGE_RETURN = '\r'
 TERMINAL_ESCAPE_CLEAR_LINE = '\033[K'
@@ -54,17 +51,20 @@ fe / frontend - Run `make frontend-build` against specified apps*
             * - Specify apps as a space-separator partial match on the name, e.g. 'buy search' to match the
                 buyer-frontend and the search-api. If no match string is supplied, all apps will match."""
 
-    def __init__(self, manifest, command, checkout_dir='./code', download=False):
-        self._manifest = os.path.realpath(manifest)
-        self._command = command
-        self._checkout_dir = os.path.realpath(checkout_dir)
-        self._download = download
+    def __init__(self, manifest_path: str, command: str, download: bool=False):
+        self._manifest_path: str = os.path.realpath(manifest_path)
+        self._command: str = command
+        self._download: bool = download
 
-        with open(self._manifest) as manifest:
-            self.config = yaml.safe_load(manifest)
+        with open(self._manifest_path) as manifest:
+            self.manifest = yaml.safe_load(manifest)
+
+        self._checkout_directory = os.path.realpath(self.manifest['config']['checkout_directory'])
 
         try:
+            os.makedirs(self._checkout_directory)
             os.makedirs(DMRunner.LOGGING_DIR)
+
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
@@ -72,13 +72,14 @@ fe / frontend - Run `make frontend-build` against specified apps*
         curr_signal = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        self.manager = multiprocessing.Manager()
-        self.log_queue = self.manager.Queue()
-        self.apps = self.manager.dict()
+        self._manager: multiprocessing.Manager = multiprocessing.Manager()
+        self._log_queue: multiprocessing.Queue = self._manager.Queue()
+        self._services: dict = self._manager.dict()
+        self._apps: dict = self._manager.dict()
 
         signal.signal(signal.SIGINT, curr_signal)  # Probably a race condition?
 
-        self._processes = {}
+        self._processes: dict = {}
         self._repositories = self._get_repository_directories()
         self._populate_multiprocessing_components()
 
@@ -87,10 +88,10 @@ fe / frontend - Run `make frontend-build` against specified apps*
         self._suppress_log_printing = False
         self._filter_logs = []
 
-        self.log_processor_shutdown = threading.Event()
-        self.log_thread = threading.Thread(target=self._process_logs, name='Thread-Logging')
-        self.log_thread.setDaemon(True)
-        self.log_thread.start()
+        self._log_processor_shutdown = threading.Event()
+        self._log_thread = threading.Thread(target=self._process_logs, name='Thread-Logging')
+        self._log_thread.setDaemon(True)
+        self._log_thread.start()
 
         readline.parse_and_bind('tab: complete')
         readline.set_completer(self._app_name_completer)
@@ -98,32 +99,32 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
     @property
     def _app_name_width(self):
-        if not self._repositories:
-            return 20
-
-        return max(len(get_app_name(r)) for r in itertools.chain.from_iterable(self._repositories))
+        return max(len(name) for name in itertools.chain(self.manifest['services'], self.manifest['apps']))
 
     def _app_name_completer(self, text, state):
-        options = [name for name in self.apps.keys() if text in name]
+        options = [name for name in self.manifest['apps'].keys() if text in name]
         if state < len(options):
             return options[state]
         else:
             return None
 
     def _populate_multiprocessing_components(self):
-        for repo in itertools.chain.from_iterable(self._repositories):
-            app_name = get_app_name(repo)
+        for name in itertools.chain(self.manifest['services']):
+            service = self._manager.dict()
+            service['name'] = name
+            service['process'] = PROCESS_NOEXIST
+            service['config'] = self.manifest['services'][name]
 
-            app = self.manager.dict()
-            app['name'] = app_name
+            self._services[name] = service
+
+        for name in itertools.chain(self.manifest['apps']):
+            app = self._manager.dict()
+            app['name'] = name
             app['process'] = PROCESS_NOEXIST
-            app['repo_path'] = repo
-            app['run_all'] = self._run_all
-            app['rebuild'] = self._rebuild
-            app['nix'] = self._nix
-            app['docker'] = self._docker
+            app['dirpath'] = os.path.join(self._checkout_dir, os.path.basename(self.manifest['apps']['git']))
+            app['config'] = self.manifest['apps'][name]
 
-            self.apps[app_name] = app
+            self._apps[name] = app
 
     def _get_repository_directories(self):
         """Automagically locates digitalmarketplace frontend and api repositories.
@@ -147,33 +148,6 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         return tuple(tuple(repos) for repos in all_repos)
 
-    def _get_status_endpoint_prefix(self, port):
-        try:
-            with open(DMRunner.NGINX_CONFIG_FILE) as infile:
-                parser = NginxParser()
-                nginx_config = parser.parse(infile.read())
-
-        except FileNotFoundError:
-            try:
-                with open(os.path.join(
-                    self._checkout_dir,
-                    'digitalmarketplace-functional-tests',
-                    'nginx',
-                    'nginx.conf'
-                )) as infile:
-                    parser = NginxParser()
-                    nginx_config = parser.parse(infile.read())
-
-            except FileNotFoundError:
-                return None
-
-        location = list(filter(lambda loc: loc.children[0].value.endswith(str(port)),
-                               nginx_config['http']['server'].get_all('location')))
-        if location:
-            return location[0].parameter
-
-        return '/'
-
     def _check_app_status(self, app, loop=False):
         checked = False
         status = 'down'
@@ -192,38 +166,9 @@ fe / frontend - Run `make frontend-build` against specified apps*
             else:
                 print('checking...')
                 try:
-                    # Find ports bound by the above processes and check /_status endpoints.
-                    if app['docker']:
-                        try:
-                            inspect_output = subprocess.check_output(['docker', 'inspect', app['name']])
-                            inspect_dict = json.loads(inspect_output)
-                            host_port = int(inspect_dict[0]['NetworkSettings']['Ports']['80/tcp'][0]['HostPort'])
-                            base_url = 'http://{}:{}'.format('localhost', host_port)
+                    status_endpoint = urljoin(app['config']['healthcheck'], os.path.join(prefix, '_status'))
 
-                        except (subprocess.CalledProcessError, KeyError):
-                            error_msg = 'Container not yet ready'
-                            time.sleep(0.5)
-                            continue
-
-                        print(base_url)
-
-                    else:
-                        parent = psutil.Process(app['process'])
-
-                        child = parent.children()[0].children()[0] if app['nix'] else parent.children()[0]
-
-                        valid_conns = list(filter(lambda x: x.status == 'LISTEN', child.connections()))[0]
-
-                        base_url = 'http://{}:{}'.format(*valid_conns.laddr)
-                        host_port = valid_conns.laddr[1]
-
-                    prefix = self._get_status_endpoint_prefix(host_port)
-                    if prefix is None:
-                        return 'unknown', {'message': 'Nginx configuration not detected'}
-
-                    status_endpoint = urljoin(base_url, os.path.join(prefix, '_status'))
-
-                    # self.print_out('Checking status for {} at {}'.format(app['name'], status_endpoint))
+                    self.print_out('Checking status for {} at {}'.format(app['name'], status_endpoint))
                     try:
                         res = requests.get(status_endpoint)
                         data = json.loads(res.text)
@@ -247,10 +192,6 @@ fe / frontend - Run `make frontend-build` against specified apps*
                     error_msg = 'Process launched but not yet bound to port'
                     time.sleep(0.5)
 
-                except (ProcessLookupError, psutil.NoSuchProcess) as e:
-                    error_msg = 'Process has gone away'
-                    break
-
             checked = True
 
         return status, {'message': error_msg}
@@ -264,7 +205,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
                 self.print_out('Checking {} ...'.format(app_name))
 
             self._suppress_log_printing = quiet
-            result, data = self._check_app_status(self.apps[app_name], loop=True)
+            result, data = self._check_app_status(self._apps[app_name], loop=True)
             self._suppress_log_printing = False
 
             if not data or 'status' not in data or data['status'] != 'ok':
@@ -275,8 +216,8 @@ fe / frontend - Run `make frontend-build` against specified apps*
         return down_apps
 
     def _process_logs(self):
-        while not self.log_processor_shutdown.is_set():
-            log_job = self.log_queue.get()
+        while not self._log_processor_shutdown.is_set():
+            log_job = self._log_queue.get()
             log_entry = log_job['log']
             log_name = log_job.get('name', 'manager')
 
@@ -292,16 +233,16 @@ fe / frontend - Run `make frontend-build` against specified apps*
                 with open(os.path.join(DMRunner.LOGGING_DIR, f), 'a') as outfile:
                     outfile.write('{}\n'.format(log_entry))
 
-            self.log_queue.task_done()
+            self._log_queue.task_done()
 
     def _find_matching_apps(self, selectors):
         if not selectors:
-            found_apps = self.apps.keys()
+            found_apps = self._apps.keys()
         else:
             found_apps = []
             for selector in selectors:
                 found_app = None
-                for app_name, app_process in self.apps.items():
+                for app_name, app_process in self._apps.items():
                     if selector in app_name and app_name not in found_apps:
                         found_app = app_name if not found_app or len(app_name) < len(found_app) else found_app
 
@@ -366,16 +307,16 @@ fe / frontend - Run `make frontend-build` against specified apps*
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             padded_app_name = r'{{:>{}s}}'.format(self._app_name_width).format(app_name)
             colored_app_name = re.sub(app_name,
-                                      self._stylize(app_name, **self.config['styles'].getdict(app_name, fallback={})),
+                                      self._stylize(app_name, **self.manifest['styles'].getdict(app_name, fallback={})),
                                       padded_app_name)
             log_prefix = '{} {}'.format(timestamp, colored_app_name)
 
             terminal_width = shutil.get_terminal_size().columns - (len(timestamp) + self._app_name_width + 4)
             msgs = [msg[x:x + terminal_width] for x in range(0, len(msg), terminal_width)]
 
-            for key in self.config['styles'].keys():
+            for key in self.manifest['styles'].keys():
                 msgs = [re.sub(r'\s{}\s'.format(key), ' {} '.format(
-                    self._stylize(key, **self.config['styles'].getdict(key, fallback={}))), msg) for msg in msgs]
+                    self._stylize(key, **self.manifest['styles'].getdict(key, fallback={}))), msg) for msg in msgs]
 
             for msg in msgs:
                 msg = re.sub(r'(WARN(?:ING)?)', self._stylize(r'\1', fg='yellow'), msg)
@@ -390,7 +331,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
     def run_single_repository(self, app):
         # We are here if the script is booting up. If run_all was supplied, we should run-all for the initial run.
-        self._processes[app['name']] = DMProcess(app, self.log_queue)
+        self._processes[app['name']] = DMProcess(app, self._log_queue)
 
         if app['rebuild']:
             self.print_out('Running {}-build...'.format(self._stylize(app['name'], attr='bold')))
@@ -409,12 +350,12 @@ fe / frontend - Run `make frontend-build` against specified apps*
             for repos in self._repositories:
                 for repo in repos:
                     app_name = get_app_name(repo)
-                    self.run_single_repository(app=self.apps[app_name])
+                    self.run_single_repository(app=self._apps[app_name])
 
                 down_apps.update(self._ensure_repos_up(repos))
 
             if not down_apps:
-                self.print_out('All apps up and running: {}  '.format(' '.join(self.apps.keys())))
+                self.print_out('All apps up and running: {}  '.format(' '.join(self._apps.keys())))
             else:
                 self.print_out('There were some problems bringing up the full DM app suite.')
 
@@ -446,7 +387,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         self._suppress_log_printing = True
 
-        for app_name, app in self.apps.items():
+        for app_name, app in self._apps.items():
             status, data = self._check_app_status(app)
 
             ppid = str(app['process']) if app['process'] > 0 else 'N/A'
@@ -473,16 +414,16 @@ fe / frontend - Run `make frontend-build` against specified apps*
         branches_table.align['BRANCH'] = 'l'
         branches_table.align['LAST COMMIT'] = 'r'
 
-        for app_name, app in self.apps.items():
+        for app_name, app in self._apps.items():
             try:
                 branch_name = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-                                                      cwd=app['repo_path'], universal_newlines=True).strip()
+                                                      cwd=app['dirpath'], universal_newlines=True).strip()
             except:
                 branch_name = "unknown"
 
             try:
                 last_commit = subprocess.check_output(['git', 'log', '-1', '--format=%cd', '--date=local'],
-                                                      cwd=app['repo_path'], universal_newlines=True).strip()
+                                                      cwd=app['dirpath'], universal_newlines=True).strip()
                 last_commit_datetime = datetime.datetime.strptime(last_commit, '%c')
                 last_commit_days_old = max(0, (datetime.datetime.utcnow() - last_commit_datetime).days)
                 age = ('{} days ago'.format(last_commit_days_old)
@@ -503,14 +444,14 @@ fe / frontend - Run `make frontend-build` against specified apps*
         for repos in self._repositories:
             for repo in repos:
                 app_name = get_app_name(repo)
-                app = self.apps[app_name]
+                app = self._apps[app_name]
 
                 if app_name not in matched_apps:
                     continue
 
                 try:
                     p = psutil.Process(app['process'])
-                    assert p.cwd() == app['repo_path']
+                    assert p.cwd() == app['dirpath']
 
                 except (ProcessLookupError, psutil.NoSuchProcess, KeyError, AssertionError, ValueError):
                     self.print_out('The {} is DOWN. Restarting ...'.format(app_name))
@@ -529,10 +470,10 @@ fe / frontend - Run `make frontend-build` against specified apps*
             if not remake:
                 self.print_out('Try `remake` to launch using `make run-all`')
 
-        if recovered_apps and len(recovered_apps) < len(self.apps.keys()):
+        if recovered_apps and len(recovered_apps) < len(self._apps.keys()):
             self.print_out('These apps are back up and running: {}  '.format(' '.join(recovered_apps)))
 
-        if not failed_apps and len(recovered_apps) == len(self.apps.keys()):
+        if not failed_apps and len(recovered_apps) == len(self._apps.keys()):
             self.print_out('All apps up and running: {}  '.format(' '.join(recovered_apps)))
 
     def cmd_kill_apps(self, selectors='', silent_fail=False):
@@ -540,7 +481,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         for app_name in self._find_matching_apps(selectors):
             try:
-                p = psutil.Process(self.apps[app_name]['process'])
+                p = psutil.Process(self._apps[app_name]['process'])
                 procs.append(p)
 
                 children = []
@@ -566,14 +507,14 @@ fe / frontend - Run `make frontend-build` against specified apps*
         for app_name in self._find_matching_apps(selectors):
             if app_name.endswith('-frontend'):
                 app_build_name = app_name.replace('frontend', 'fe-build')
-                app_build = self.apps[app_name].copy()
+                app_build = self._apps[app_name].copy()
                 app_build['name'] = app_build_name
 
-                if app_build_name not in self.config['styles'].keys():
-                    self.config['styles'][app_build_name] = self.config['styles'].get(app_name)
+                if app_build_name not in self.manifest['styles'].keys():
+                    self.manifest['styles'][app_build_name] = self.manifest['styles'].get(app_name)
 
                 # Ephemeral process to run the frontend-build. Not tracked.
-                DMProcess(app_build, self.log_queue)
+                DMProcess(app_build, self._log_queue)
 
             self.print_out('Starting frontend-build on {} '.format(app_name))
 
@@ -584,7 +525,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
             try:
                 if self._shutdown:
                     self.print_out('Shutting down...')
-                    self.log_processor_shutdown.set()
+                    self._log_processor_shutdown.set()
                     self.cmd_kill_apps()
                     return
 

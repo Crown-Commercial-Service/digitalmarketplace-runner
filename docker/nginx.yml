@@ -1,0 +1,33 @@
+version: '2'
+
+services:
+  api:
+    restart: always
+    image: "digitalmarketplace/api:latest"
+    ports:
+      - "5000:80"
+    environment:
+      - DM_ENVIRONMENT=development
+      - SQLALCHEMY_DATABASE_URI=postgresql://dmdev:dmdevpasswd@postgres:5432/digitalmarketplace
+    volumes:
+      - ./compose-scripts:/compose-scripts
+      - "${DM_DATA_API_DEVELOPMENT_REPO}:/repo"
+    command: >
+      bash -c "/compose-scripts/wait-for-postgres.py && python application.py db upgrade
+      && python application.py runserver --host 0.0.0.0 --port 80"
+    depends_on:
+      - postgres
+
+  nginx:
+    image: "digitalmarketplace/local-nginx:latest"
+    networks:
+      - dmrunner
+    build:
+      context: ./
+      dockerfile: ./local-nginx.docker
+    ports:
+      - "80:80"
+
+networks:
+  dmrunner:
+    driver: bridge

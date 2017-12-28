@@ -54,7 +54,7 @@ class DMProcess:
         self.log_queue.put({'name': self.app['name'], 'log': log_entry.strip('\n')})
 
     def _run_in_thread(self, run_cmd, popen_args):
-        app_instance = subprocess.Popen(' '.join(run_cmd), cwd=self.app['repo_path'], env=self._get_clean_env(),
+        app_instance = subprocess.Popen(' '.join(run_cmd), cwd=self.app['dirpath'], env=self._get_clean_env(),
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
                                         bufsize=1, start_new_session=True, **popen_args)
 

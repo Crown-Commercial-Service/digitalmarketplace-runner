@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import argparse
+from argparse import ArgumentParser
 from dmrunner.runner import DMRunner
 
 """
@@ -17,19 +17,16 @@ TODO:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser: ArgumentParser = ArgumentParser()
     parser.add_argument('--manifest', '-m', help='Specify the location of the manifest file to use for detecting and'
                                                  'running services and applications (default: manifest.yml).')
     parser.add_argument('--command', '-c', help='Override the command used from the manifest for running apps '
                                                 '(default: run).')
-    parser.add_argument('--checkout-directory', default='./code', help='The directory in which to checkout required '
-                                                                       'code from source control (default=./code).')
     parser.add_argument('--download', action='store_true', help='Download main digitalmarketplace repositories.')
 
     args = parser.parse_args()
 
-    runner = DMRunner(manifest=args.manifest, command=args.command, checkout_dir=args.checkout_directory,
-                      download=args.download)
+    runner: DMRunner = DMRunner(manifest_path=args.manifest, command=args.command, download=args.download)
     runner.run()
 
 
