@@ -1,40 +1,27 @@
 config:
   checkout_directory: ./code
+  compose: ./config/docker-compose.yml
 
 services:
   nginx:
     type: docker-compose
-    source: ./docker-compose.yml
 
   postgres:
     type: docker-compose
-    source: ./docker-compose.yml
 
   elasticsearch:
-    type: docker-compose
-    source: ./docker-compose.yml
+    type: local
 
 apps:
   api:
+    type: nix
+    dirname: digitalmarketplace-api
     git: https://github.com/alphagov/digitalmarketplace-api
     commands:
-      run: make run-app
-      run-all: make run-all
+      run: make run-all
       build: make frontend-build
-    healthcheck: localhost:5000/_status
+    healthcheck: http://localhost:5000/_status
     order: 1
-    color:
+    styles:
       fg: blue
-      attr: bold
-
-  user-frontend:
-    git: https://github.com/alphagov/digitalmarketplace-user-frontend
-    commands:
-      run: make run-app
-      run-all: make run-all
-      build: make frontend-build
-    healthcheck: localhost:5006/_status
-    order: 2
-    color:
-      fg: dark_orange_3b
       attr: bold

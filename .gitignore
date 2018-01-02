@@ -2,3 +2,4 @@ venv*/
 logs/*
 __pycache__
 code/*
+config/sql/data/*

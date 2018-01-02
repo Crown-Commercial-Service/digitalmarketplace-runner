@@ -24,7 +24,7 @@ import threading
 from urllib.parse import urljoin
 import yaml
 
-from .process import DMProcess
+from .process import DMProcess, DMService
 from .utils import PROCESS_TERMINATED, PROCESS_NOEXIST
 
 TERMINAL_CARRIAGE_RETURN = '\r'
@@ -80,7 +80,6 @@ fe / frontend - Run `make frontend-build` against specified apps*
         signal.signal(signal.SIGINT, curr_signal)  # Probably a race condition?
 
         self._processes: dict = {}
-        self._repositories = self._get_repository_directories()
         self._populate_multiprocessing_components()
 
         self._shutdown = False
@@ -121,32 +120,20 @@ fe / frontend - Run `make frontend-build` against specified apps*
             app = self._manager.dict()
             app['name'] = name
             app['process'] = PROCESS_NOEXIST
-            app['dirpath'] = os.path.join(self._checkout_dir, os.path.basename(self.manifest['apps']['git']))
+            app['dirpath'] = os.path.join(self._checkout_directory,
+                                          os.path.basename(self.manifest['apps'][name]['git']))
             app['config'] = self.manifest['apps'][name]
 
             self._apps[name] = app
 
-    def _get_repository_directories(self):
-        """Automagically locates digitalmarketplace frontend and api repositories.
-        :return: Two tuples (api_repository, ...), (frontend_repository, ...). Each repository tuple should come up fully
-        (/_status endpoint resolves) before the next set will be launched."""
-        all_repos = []
+    def _sorted_and_grouped_app_config(self):
+        """Groups entries in self.manifest together in a nested list of lists, where each sublist contains all
+        entries in the manifest with the same order, and where the sublists are in ascending order (ie lowest first).
 
-        for matcher in DMRunner.DM_REPO_PATTERNS:
-            matched_repos = []
-
-            directories = filter(lambda x: os.path.isdir(x),
-                                 map(lambda x: os.path.join(self._checkout_dir, x),
-                                     os.listdir(self._checkout_dir)))
-            for directory in directories:
-
-                if matcher.match(os.path.basename(directory)):
-                    matched_repos.append(directory)
-
-            if matched_repos:
-                all_repos.append(matched_repos)
-
-        return tuple(tuple(repos) for repos in all_repos)
+        Example return: [[{'api': config}, {'search-api': config}], [{'buyer-fe': config}]]
+        """
+        return [{app_name: app_config for app_name, app_config in app_group} for _, app_group in
+                itertools.groupby(self.manifest['apps'].items(), lambda d: d[1]['order'])]
 
     def _check_app_status(self, app, loop=False):
         checked = False
@@ -155,7 +142,6 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         while loop or not checked:
             if app['process'] == PROCESS_NOEXIST:
-                print('sleeping')
                 time.sleep(0.5)
                 continue
 
@@ -166,7 +152,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
             else:
                 print('checking...')
                 try:
-                    status_endpoint = urljoin(app['config']['healthcheck'], os.path.join(prefix, '_status'))
+                    status_endpoint = app['config']['healthcheck']
 
                     self.print_out('Checking status for {} at {}'.format(app['name'], status_endpoint))
                     try:
@@ -199,8 +185,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
     def _ensure_repos_up(self, repos, quiet=False):
         down_apps = set()
 
-        for repo in repos:
-            app_name = get_app_name(repo)
+        for app_name, app_config in repos.items():
             if not quiet:
                 self.print_out('Checking {} ...'.format(app_name))
 
@@ -265,27 +250,11 @@ fe / frontend - Run `make frontend-build` against specified apps*
         else:
             self.print_out('Authentication to Github succeeded.')
 
-        self.print_out('Locating Digital Marketplace repositories...')
-        while res is None or res.links.get('next', {}).get('url', None):
-            page += 1
-            res = requests.get('https://api.github.com/orgs/alphagov/repos?per_page=100&page={}'.format(page))
-            if res.status_code != 200:
-                print(res)
-                print(res.text)
-
-            repos = json.loads(res.text)
-            for repo in repos:
-                for pattern in DMRunner.DM_REPO_PATTERNS:
-                    if pattern.match(repo['name']):
-                        app_name = get_app_name(repo['name'])
-                        self.print_out('Found {} '.format(app_name))
-                        matching_repos[app_name] = {'url': repo['html_url']}
-
-        for repo_name, repo_details in matching_repos.items():
-            self.print_out('Cloning {} ...'.format(repo_name))
-            retcode = subprocess.call(['git', 'clone', repo_details['url']], cwd=self._checkout_dir)
+        for app_name, app_config in self.manifest['apps'].items():
+            self.print_out('Cloning {} ...'.format(app_name))
+            retcode = subprocess.call(['git', 'clone', app_config['git']], cwd=self._checkout_directory)
             if retcode != 0:
-                self.print_out('Problem cloning {} - errcode {}'.format(repo_name, retcode))
+                self.print_out('Problem cloning {} - errcode {}'.format(app_name, retcode))
 
         self.print_out('Done')
 
@@ -307,16 +276,18 @@ fe / frontend - Run `make frontend-build` against specified apps*
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             padded_app_name = r'{{:>{}s}}'.format(self._app_name_width).format(app_name)
             colored_app_name = re.sub(app_name,
-                                      self._stylize(app_name, **self.manifest['styles'].getdict(app_name, fallback={})),
+                                      self._stylize(app_name,
+                                                    **self.manifest['apps'].get(app_name, {}).get('styles', {})),
                                       padded_app_name)
             log_prefix = '{} {}'.format(timestamp, colored_app_name)
 
             terminal_width = shutil.get_terminal_size().columns - (len(timestamp) + self._app_name_width + 4)
             msgs = [msg[x:x + terminal_width] for x in range(0, len(msg), terminal_width)]
 
-            for key in self.manifest['styles'].keys():
-                msgs = [re.sub(r'\s{}\s'.format(key), ' {} '.format(
-                    self._stylize(key, **self.manifest['styles'].getdict(key, fallback={}))), msg) for msg in msgs]
+            for app_name in self.manifest['apps'].keys():
+                msgs = [re.sub(r'\s{}\s'.format(app_name), ' {} '.format(
+                    self._stylize(app_name,
+                                  **self.manifest['apps'].get(app_name, {}).get('styles', {}))), msg) for msg in msgs]
 
             for msg in msgs:
                 msg = re.sub(r'(WARN(?:ING)?)', self._stylize(r'\1', fg='yellow'), msg)
@@ -331,11 +302,13 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
     def run_single_repository(self, app):
         # We are here if the script is booting up. If run_all was supplied, we should run-all for the initial run.
-        self._processes[app['name']] = DMProcess(app, self._log_queue)
+        self._processes[app['name']] = DMProcess(app=app, config=self.manifest['config'], log_queue=self._log_queue)
 
-        if app['rebuild']:
-            self.print_out('Running {}-build...'.format(self._stylize(app['name'], attr='bold')))
-            # self._processes['{}-build'.format(app['name'])] = DMProcess(app, log_queue)
+    def run_services(self, manifest_services):
+        for service_name, service_config in filter(lambda x: x[1].get('type') != 'local', manifest_services.items()):
+            self._processes[service_name] = DMService(service=self._services[service_name],
+                                                      config=self.manifest['config'].copy(),
+                                                      log_queue=self._log_queue)
 
     def run(self):
         atexit.register(self.cmd_kill_apps, silent_fail=True)
@@ -345,14 +318,15 @@ fe / frontend - Run `make frontend-build` against specified apps*
                 self._download_repos()
                 return
 
+            self.run_services(self.manifest['services'])
+
             down_apps = set()
 
-            for repos in self._repositories:
-                for repo in repos:
-                    app_name = get_app_name(repo)
+            for app_group in self._sorted_and_grouped_app_config():
+                for app_name, app_config in app_group.items():
                     self.run_single_repository(app=self._apps[app_name])
 
-                down_apps.update(self._ensure_repos_up(repos))
+                down_apps.update(self._ensure_repos_up(app_group))
 
             if not down_apps:
                 self.print_out('All apps up and running: {}  '.format(' '.join(self._apps.keys())))
@@ -441,8 +415,8 @@ fe / frontend - Run `make frontend-build` against specified apps*
         recovered_apps = set()
         failed_apps = set()
 
-        for repos in self._repositories:
-            for repo in repos:
+        for app_group in self._sorted_and_grouped_app_config():
+            for app_name, app_config in app_group.items():
                 app_name = get_app_name(repo)
                 app = self._apps[app_name]
 
@@ -514,7 +488,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
                     self.manifest['styles'][app_build_name] = self.manifest['styles'].get(app_name)
 
                 # Ephemeral process to run the frontend-build. Not tracked.
-                DMProcess(app_build, self._log_queue)
+                DMProcess(app=app_build, config=self.manifest['config'], log_queue=self._log_queue)
 
             self.print_out('Starting frontend-build on {} '.format(app_name))
 

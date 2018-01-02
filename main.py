@@ -18,10 +18,11 @@ TODO:
 
 def main():
     parser: ArgumentParser = ArgumentParser()
-    parser.add_argument('--manifest', '-m', help='Specify the location of the manifest file to use for detecting and'
-                                                 'running services and applications (default: manifest.yml).')
-    parser.add_argument('--command', '-c', help='Override the command used from the manifest for running apps '
-                                                '(default: run).')
+    parser.add_argument('--manifest', '-m', default='manifest.yml',
+                        help='Specify the location of the manifest file to use for detecting and running services and '
+                             'applications (default: manifest.yml).')
+    parser.add_argument('--command', '-c', default='run',
+                        help='Override the command used from the manifest for running apps (default: run).')
     parser.add_argument('--download', action='store_true', help='Download main digitalmarketplace repositories.')
 
     args = parser.parse_args()
