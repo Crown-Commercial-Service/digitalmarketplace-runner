@@ -1,0 +1,41 @@
+version: '2'
+
+networks:
+  dmrunner:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+services:
+  postgres:
+    container_name: dm-postgres
+    networks:
+      - dmrunner
+    image: "postgres:9.5"
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+    environment:
+      - DMRUNNER_USER
+
+  elasticsearch:
+    container_name: dm-elasticsearch
+    networks:
+      - dmrunner
+    image: "elasticsearch:5.4"
+    ports:
+      - "9200:9200"
+
+  nginx:
+    container_name: dm-nginx
+    networks:
+      - dmrunner
+    image: "digitalmarketplace/local-nginx:latest"
+    build:
+      context: ./
+      dockerfile: dockerfile.nginx
+    ports:
+      - "80:80"
+

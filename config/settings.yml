@@ -1,0 +1,154 @@
+# This file contains mostly-static data that doesn't need to be edited by the end-user but shouldn't be embedded in
+# code directly.
+
+# The base git url used to clone repositories that need to be checked-out. If these ever end up fragmented, this needs
+# moving under each 'repositories' key.
+base-git-url: git@github.com:alphagov
+
+# The path to the Docker compose file used for running services. This shouldn't need to change.
+docker-compose-filepath: config/docker-compose.yml
+
+# The host to query when running healthchecks on apps
+server: localhost
+
+data-dump-url: https://drive.google.com/drive/u/0/folders/0B9HQ_eYjd1zjWm9DaEpNUzZhRzg
+sql-data-path: config/sql/data
+
+# Details repositories to be downloaded, bootstrapped, and executed.
+repositories:
+  # Core repositories to download and run.
+  digitalmarketplace-api:
+    name: api
+    short-name: api
+    bootstrap: make requirements-dev run-migrations
+    run-order: 1
+    healthcheck:
+      port: 5000
+      endpoint: /_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+
+  digitalmarketplace-search-api:
+    name: search-api
+    short-name: search
+    bootstrap: make requirements-dev
+    run-order: 1
+    healthcheck:
+      port: 5001
+      endpoint: /_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+
+  digitalmarketplace-admin-frontend:
+    name: admin-frontend
+    short-name: admin
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5004
+      endpoint: /admin/_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  digitalmarketplace-brief-responses-frontend:
+    name: brief-responses-frontend
+    short-name: brf-resp
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5006
+      endpoint: /suppliers/opportunities/_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  digitalmarketplace-briefs-frontend:
+    name: briefs-frontend
+    short-name: briefs
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5005
+      endpoint: /buyers/_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  digitalmarketplace-buyer-frontend:
+    name: buyer-frontend
+    short-name: buyer
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5002
+      endpoint: /_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  digitalmarketplace-supplier-frontend:
+    name: supplier-frontend
+    short-name: supplier
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5003
+      endpoint: /suppliers/_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  digitalmarketplace-user-frontend:
+    name: user-frontend
+    short-name: user
+    bootstrap: make requirements-dev yarn-install frontend-build
+    run-order: 2
+    healthcheck:
+      port: 5007
+      endpoint: /user/_status
+    commands:
+      run: make run-app
+      rebuild: make run-all
+      frontend: make frontend-build
+
+  # Additional repositories to download and bootstrap during setup, but aren't "run" like the rest of the apps.
+  digitalmarketplace-scripts:
+    name: scripts
+    bootstrap: make requirements-dev
+
+  digitalmarketplace-functional-tests:
+    name: functional-tests
+
+index:
+  repository: digitalmarketplace-scripts
+  command: venv/bin/python scripts/index-to-search-service.py
+  test: http://localhost:9200/{index}
+
+  dependencies:
+    - digitalmarketplace-api
+    - digitalmarketplace-search-api
+
+  indices:
+    - positional:
+        - services
+        - dev
+      keyword:
+        frameworks: g-cloud-9
+        index: g-cloud-9
+        create-with-mapping: services
+
+    - positional:
+        - briefs
+        - dev
+      keyword:
+        frameworks: digital-outcomes-and-specialists-2
+        index: briefs-digital-outcomes-and-specialists
+        create-with-mapping: briefs-digital-outcomes-and-specialists-2

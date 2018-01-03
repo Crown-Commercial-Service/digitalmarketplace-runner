@@ -1,54 +1,31 @@
 ## Digital Marketplace Runner
-A utility script that will run your API/frontend repositories together and allow you to minimally interact with the
-running processes and their logs. This script is primarily compatible with OSX; running against other OSs may require
-some care and consideration. At its simplest, as an existing developer, you should be able to clone this repo and
-simply type `make` to run all your checked out apps.
+A utility to run your API/frontend repositories together (and backing services if required), while allowing you to
+interact with the running processes and their logs. This script is primarily compatible with OSX; running against other
+OSs may require some care and consideration. At its simplest, as an existing developer, you should be able to clone this
+repo, run `make setup` and follow the instructions, then just run `make` to bring up all your checked out apps.
 
-## Prerequisites / Assumptions
-* You have a pre-existing development environment, including eg:
-  * Python 3 (with headers) installed globally with `pip` and `virtualenv` packages.
-  * Backend services installed and running (as of writing: postgresql-9.6, elasticsearch-1.7, nginx, nodejs)
-  * Other dependencies with headers as appropriate (openssl, libssl-dev, libxml2-dev, libxslt-dev, libffi-dev,
-    libyaml-dev, lib32ncurses-dev, postgresql-server-dev). Others may be required.
-  * Postgres populated with development data from Google Drive.
-  * Nginx bootstrapped with the required routing (eg from `digitalmarketplace-functional-tests/nginx/bootstrap.sh`).
-  * Nginx config installed at `/usr/local/etc/nginx/nginx.conf` (default location) **or** you have digitalmarketplace-functional-tests checked out alongside app repos.
-  * Your api/frontend repos should have relatively up-to-date code, containing Python 3 virtualenvs.
-  * Your api/frontend repos are checked out next to each other on your filesystem.
-  * You hav Nix installed (only required if you want to use it the runner's Nix option).
+## Requirements
+You must have the following tools available in order to successfully use the DM Runner:
+* Python 3 (including headers if appropriate) installed globally with `pip` and `virtualenv` packages.
+* Bower 1.8+, Node v6.12.2 (consider using Node Version Manager), and NPM 3+ installed and available in your path.
+* You have Docker/**Docker for Mac 17.09+** installed (if you want backing services managed for you).
 
 ## Instructions
-### Fresh start
+1. Ensure your environment meets the requirements.
 1. Clone this repository into an empty directory (e.g. `~/gds`, `~/dm`, or whatever), so that you have something like 
 `~/gds/dmrunner`.
-2. Run `make download`.
-3. Ensure all required dependencies are in place (including dev data in postgres).
-4. Run `make all`.
-
-### Existing repos
-1. Clone this repository to the same directory that contains your api/frontend repos.
-2. `cd` into the `dmrunner` repository.
-3. `make` to launch all digitalmarketplace apps that you have checked out. If any of your repos are newly checked out,
-   or may have missing/out-of-date virtualenvs, use `make all`.
-4. Once the initial boot-up sequence is complete, you'll see a prompt. A number of commands are available to interact
-   with your running processes. You also have command history available with arrow keys and tab completion for app
-   names.
+2. Run `make setup` - follow instructions.
+4. Run `make` to bring up the Digital Marketplace locally.
 
 ## `make` commands
 ### Options
-* `make download` - Clones all api/frontend repositories.
+* `make setup` - Verifies your local environment is suitable and performs basic setup.
 * `make`/`make run` - Launches all repos using `make run-app`.
-* `make all` - Launches all repos using `make run-all`.
-* `make nix` - Launches all repos using `make run-app` inside the repo's `nix-shell`.
-* `make nix-all` - Launches all repos using `make run-all` inside the repo's `nix-shell`.
-
-## Arguments
-You can supply a number of optional arguments to `make` with `make ARGS='' <goal>`':
- * `--all` - use `make run-all` against each repository rather than `make run-app`
- * `--nix` - run each app through nix
+* `make rebuild` - Launches all repos with an initial `make run-all` to build eg frontend assets.
 
 ## Commands
-After the apps have done their initial boot-up cycle, you have a few commands at your disposal:
+After the apps have done their initial boot-up cycle, you have a few commands at your disposal which are detailed below.
+There is tab-completion for app names and you can scroll up/down to see your command history.
 
 #### H / Help
 Print out a list of commands available to you.
@@ -62,8 +39,8 @@ Print which branches you're running for each app.
 #### R / Restart
 Restart any failed or down apps using `make run-app`.
 
-#### Remake
-Restart any failed or down apps using `make run-all`.
+#### RB / Rebuild
+Rebuild and restart any failed or down apps using `make rebuild`, which also does NPM install and frontend-build.
 
 #### F / Filter
 By default, incoming logs from all apps are interleaved together. You can use this to toggle on a filter to show only
@@ -71,7 +48,7 @@ logs from specific apps. With no arguments, this command resets any filters, sho
 closest-matching app name for each word will be filtered in for logging purposes (eg 'f api buyer' will cause only
 logs for the data api and the buyer-frontend to be shown).
 
-#### FE / frontend
+#### FE / Frontend
 Runs `make frontend-build` against frontend apps. With arguments, the closest-matching app name for each word will be
 rebuilt (eg 'fe buyer supplier' will run a `frontend-build` on the buyer-frontend and the supplier-frontend. With no
 arguments, all frontend apps will be rebuilt. This is a one-off rebuild; for ongoing rebuilds use `FW`.
@@ -83,20 +60,18 @@ for each word will be killed (eg 'k search briefs' will take down the search-api
 #### Q / Quit
 Kill all running apps and quit back to your shell.
 
-## Logs
-Regardless of filtering, all logs are also stored in `./logs` for later reading if required.
+## Configuration
+You can configure certain aspects of the runner by editing config/config.yml (after initial setup). Configurable options
+includeS:
+* The parent directory to scan for Digital Marketplace repositories
+* Whether, and where, to persistently store application logs to disk
+* Highlighting in logs displayed to the terminal
+* Indentation on wrapped log lines in the display
 
 ## Troubleshooting
-* If the program crashes, it might leave processes running around behind the scenes. Use `ps -ef|grep "python\|nix"` to find any
-orphaned processes and then `kill` them before re-launching the runner.
-* If any apps report "make[1]: *** No rule to make target `run-app'.  Stop.", they're really out of date. Update them and run-all/'remake'.
+* Troubleshooting tips to go here...
 
 ## Todo
 * Refactoring...
-* Manage config better.
-* Use our standard dockerised backend services for elasticsearch/postgres/nginx so that this can be a quick setup for
-  new developers.
-* Look into using dockerised apps with volumes for local code. (i.e. `make docker`, eventually probably just to replace
-  the default `make`))
-* Move app colors out to config file
-* Upgrade `make download` to `make new` which fully sets-up dev environment from scratch (maybe not viable/desirable).
+* Add Nix detection to setup and, by default, run apps using Nix to avoid local requirements on node/npm/bower/etc.
+* Allow use of frontend-build:watch to continually rebuild assets

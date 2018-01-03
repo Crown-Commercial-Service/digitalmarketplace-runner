@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 
-import ast
+import ansiwrap
 import atexit
 import colored
-import configparser
 import datetime
-import errno
 import itertools
 import json
 import multiprocessing
@@ -14,189 +12,205 @@ import prettytable
 import psutil
 import re
 import readline
-from reconfigure.parsers import NginxParser
 import requests
 import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 import threading
-from urllib.parse import urljoin
+from typing import List, Optional, Tuple, Dict
+import yaml
 
-from .process import DMProcess
-from .utils import get_app_name, PROCESS_TERMINATED, PROCESS_NOEXIST
+from .process import DMProcess, DMServices
+from .setup import setup_and_check_requirements
+from .utils import (
+    RUNNER_COMMAND_RUN,
+    RUNNER_COMMANDS,
+    PROCESS_TERMINATED,
+    PROCESS_NOEXIST,
+    APP_COMMAND_RESTART,
+    APP_COMMAND_REBUILD,
+    APP_COMMAND_FRONTEND,
+    group_by_key,
+    get_app_info,
+    yellow
+)
 
 TERMINAL_CARRIAGE_RETURN = '\r'
 TERMINAL_ESCAPE_CLEAR_LINE = '\033[K'
 
+SETTINGS_PATH = os.path.join(os.path.realpath('.'), 'config', 'settings.yml')
+STATUS_OK = 'OK'
+STATUS_DOWN = 'DOWN'
+STATUS_ATTACHED = 'ATTACHED'
+
 
 class DMRunner:
-    INPUT_STRING = 'Enter command (or H for help): '
-
-    NGINX_CONFIG_FILE = '/usr/local/etc/nginx/nginx.conf'
-    CURR_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    REPO_DIR = os.path.dirname(CURR_DIR)
-    CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.dmrunner')
-    LOGGING_DIR = os.path.join(CURR_DIR, 'logs')
-
-    COMPILED_API_REPO_PATTERN = re.compile(r'^digitalmarketplace-(?:.+)?api$')
-    COMPILED_FRONTEND_REPO_PATTERN = re.compile(r'^digitalmarketplace-.*-frontend$')
-    DM_REPO_PATTERNS = [COMPILED_API_REPO_PATTERN, COMPILED_FRONTEND_REPO_PATTERN]
+    INPUT_STRING = 'Enter command (or H for help):'
 
     HELP_SYNTAX = """
  h /     help - Display this help file.
  s /   status - Check status for your apps.
  b /   branch - Check which branches your apps are running against.
  r /  restart - Restart any apps that have gone down (using `make run-app`).
-rm /   remake - Restart any apps that have gone down (using `make run-all`).
+rb /  rebuild - Rebuild and restart any failed or down apps using `make run-all`.
  f /   filter - Start showing logs only from specified apps*
 fe / frontend - Run `make frontend-build` against specified apps*
  k /     kill - Kill specified apps*
- q /     quit - Terminate all running apps and quit back to your shell.
+ q /     quit - Terminate all running services and apps and drop back to your shell.
 
             * - Specify apps as a space-separator partial match on the name, e.g. 'buy search' to match the
                 buyer-frontend and the search-api. If no match string is supplied, all apps will match."""
 
-    DEFAULT_CONFIG_STYLES = {
-        'api': {'fg': 'blue', 'attr': 'bold'},
-        'search-api': {'fg': 'cyan', 'attr': 'bold'},
-        'admin-frontend': {'fg': 'green', 'attr': 'bold'},
-        'brief-responses-frontend': {'fg': 'yellow', 'attr': 'bold'},
-        'briefs-frontend': {'fg': 'red', 'attr': 'bold'},
-        'buyer-frontend': {'fg': 'magenta', 'attr': 'bold'},
-        'supplier-frontend': {'fg': 'white', 'attr': 'bold'},
-        'user-frontend': {'fg': 'dark_orange_3b', 'attr': 'bold'},
-    }
+    def __init__(self, command: str, rebuild: bool, config_path: str, nix: bool = False,
+                 settings_path: str = SETTINGS_PATH):
+        self._command = command
+        self._rebuild: bool = rebuild
+        self._nix: bool = nix  # Not currently supported
+        self._config_path: str = config_path
+        self._settings_path: str = settings_path
 
-    def __init__(self, download=False, run_all=False, rebuild=False, nix=False):
-        self.download = download
-        self.run_all = run_all
-        self.rebuild = rebuild
-        self.nix = nix
+        assert command in RUNNER_COMMANDS
 
-        try:
-            os.makedirs(DMRunner.LOGGING_DIR)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
+        # Some state flags/vars used by eg the UI/event loop
+        self._primary_attached_app: Dict = None
+        self._shutdown: threading.Event = threading.Event()
+        self._awaiting_input: bool = False
+        self._suppress_log_printing: bool = False
+        self._filter_logs: list = []
+        self._use_docker_services: bool = False
+        self._processes: dict = {}
+        self._dmservices = None
+        self._main_log_name = 'manager'
+        self.config = {}
 
-        try:
-            os.makedirs(DMRunner.CONFIG_DIR)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
-
-        self._load_config()
-
+        # Temporarily ignore SIGINT while setting up multiprocessing components.
+        # START
         curr_signal = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        self.manager = multiprocessing.Manager()
-        self.log_queue = self.manager.Queue()
-        self.apps = self.manager.dict()
+        self._manager = multiprocessing.Manager()
+        self._apps = self._manager.dict()
 
         signal.signal(signal.SIGINT, curr_signal)  # Probably a race condition?
+        # END
 
-        self._processes = {}
-        self._repositories = self._get_repository_directories()
+        with open(self._settings_path) as settings_file:
+            self.settings: dict = yaml.safe_load(settings_file.read())
+
+        self._main_log_name = 'setup'
+        # Handles initialization of external state required to run this correctly (repos, docker images, config, etc).
+        exitcode, self._use_docker_services, self.config = setup_and_check_requirements(
+                logger=self.logger, config=self.config, config_path=self._config_path, settings=self.settings,
+                only_check_services=self._command == RUNNER_COMMAND_RUN
+        )
+
+        if exitcode or self._command != RUNNER_COMMAND_RUN:
+            self.shutdown()
+            sys.exit(exitcode)
+
+        self._main_log_name = 'manager'
+
         self._populate_multiprocessing_components()
 
-        self._shutdown = False
-        self._awaiting_input = False
-        self._suppress_log_printing = False
-        self._filter_logs = []
-
-        self.log_processor_shutdown = threading.Event()
-        self.log_thread = threading.Thread(target=self._process_logs, daemon=True, name='Thread-Logging')
-        self.log_thread.start()
-
+        # Setup tab completion for app names.
         readline.parse_and_bind('tab: complete')
         readline.set_completer(self._app_name_completer)
         readline.set_completer_delims(' ')
 
     @property
-    def _app_name_width(self):
-        if not self._repositories:
+    def _app_repositories(self) -> List[List[str]]:
+        """Returns a nested list of repository names grouped by the order they should be started."""
+        return group_by_key(self.settings['repositories'], 'run-order')
+
+
+    @property
+    def _app_name_width(self) -> int:
+        """Dynamically determines the width of the longest app name so that tables/logging output can be rendered
+        in a consistent format, regardless of which app any given entry comes from (i.e. this is used to pad text with
+        spaces)."""
+        try:
+            if not self._app_repositories:
+                return 20
+
+        except AttributeError:
             return 20
 
-        return max(len(get_app_name(r)) for r in itertools.chain.from_iterable(self._repositories))
+        return max(len(self._get_app_name(r)) for r in itertools.chain.from_iterable(self._app_repositories))
 
-    def _load_config(self):
-        config_file_path = os.path.join(DMRunner.CONFIG_DIR, 'config')
+    @property
+    def _prompt_string(self) -> str:
+        """Returns the text that should be used to form a prompt for user input. Changes when attached to an
+        application (PDB prompt)."""
+        prompt = DMRunner.INPUT_STRING
 
-        self.config = configparser.ConfigParser(converters={'dict': lambda x: ast.literal_eval(x)})
-        self.config['styles'] = DMRunner.DEFAULT_CONFIG_STYLES
-        self.config.read(config_file_path)
+        if self._attached_app:
+            prompt = self._get_cleaned_wrapped_and_styled_text('(Pdb) ', self._attached_app['name'])[0]
 
-        with open(config_file_path, 'w') as config_file:
-            self.config.write(config_file)
+        return prompt
 
-    def _app_name_completer(text, state):
-        options = [name for name in self.apps.keys() if text in name]
+    @property
+    def _attached_app(self) -> Optional[Dict]:
+        if self._primary_attached_app:
+            if self._primary_attached_app['attached'] is True:
+                return self._primary_attached_app
+
+        for app in self._apps.values():
+            if app['attached']:
+                self._primary_attached_app = app
+                return app
+
+        return None
+
+    def _get_input_and_pipe_to_target(self) -> None:
+        """Receives input from the user. Directs it to the appropriate channel, whether that be the DMRunner command
+        interpreter or an application's stdin (for using interactive debuggers)."""
+        try:
+            while not self._shutdown.is_set():
+                print('{}{}{}'.format(TERMINAL_CARRIAGE_RETURN, TERMINAL_ESCAPE_CLEAR_LINE, self._prompt_string),
+                      flush=True, end='')
+
+                self._awaiting_input = True
+                user_input = input(' ')
+                self._awaiting_input = False
+
+                if self._attached_app:
+                    self._processes[self._attached_app['name']].process_input(user_input)
+
+                else:
+                    self.process_input(user_input)
+
+        except KeyboardInterrupt:
+            pass
+
+    def _get_app_name(self, repository: str) -> str:
+        return self.settings['repositories'][repository]['name']
+
+    def _app_name_completer(self, text: str, state: int) -> Optional[str]:
+        """Used by readline to provide tab completion of app names."""
+        options = [name for name in self._apps.keys() if text in name]
         if state < len(options):
             return options[state]
         else:
             return None
 
-    def _populate_multiprocessing_components(self):
-        for repo in itertools.chain.from_iterable(self._repositories):
-            app_name = get_app_name(repo)
+    def _populate_multiprocessing_components(self) -> None:
+        """Populates the `self._apps` multiprocessing dictionary, which is read and written to by subprocesses managing
+        the running applications."""
+        for repository_name in itertools.chain.from_iterable(self._app_repositories):
+            app_name = self.settings['repositories'][repository_name]['name']
 
-            app = self.manager.dict()
+            app = self._manager.dict()
             app['name'] = app_name
             app['process'] = PROCESS_NOEXIST
-            app['repo_path'] = repo
-            app['run_all'] = self.run_all
-            app['rebuild'] = self.rebuild
-            app['nix'] = self.nix
+            app['repo_path'] = os.path.join(os.path.realpath(self.config['code']['directory']), repository_name)
+            app['repo_name'] = repository_name
+            app['attached'] = False
+            app['commands'] = self.settings['repositories'][repository_name]['commands'].copy()
 
-            self.apps[app_name] = app
-
-    def _get_repository_directories(self):
-        """Automagically locates digitalmarketplace frontend and api repositories.
-        :return: Two tuples (api_repository, ...), (frontend_repository, ...). Each repository tuple should come up fully
-        (/_status endpoint resolves) before the next set will be launched."""
-        all_repos = []
-
-        for matcher in DMRunner.DM_REPO_PATTERNS:
-            matched_repos = []
-
-            directories = filter(lambda x: os.path.isdir(x),
-                                 map(lambda x: os.path.join(os.path.realpath('..'), x),
-                                     os.listdir('..')))
-            for directory in directories:
-
-                if matcher.match(os.path.basename(directory)):
-                    matched_repos.append(directory)
-
-            if matched_repos:
-                all_repos.append(matched_repos)
-
-        return tuple(tuple(repos) for repos in all_repos)
-
-    def _get_status_endpoint_prefix(self, port):
-        try:
-            with open(DMRunner.NGINX_CONFIG_FILE) as infile:
-                parser = NginxParser()
-                nginx_config = parser.parse(infile.read())
-
-        except FileNotFoundError:
-            try:
-                with open(os.path.join(DMRunner.REPO_DIR, 'digitalmarketplace-functional-tests',
-                                       'nginx', 'nginx.conf')) as infile:
-                    parser = NginxParser()
-                    nginx_config = parser.parse(infile.read())
-
-            except FileNotFoundError:
-                return None
-
-        location = list(filter(lambda loc: loc.children[0].value.endswith(str(port)),
-                               nginx_config['http']['server'].get_all('location')))
-        if location:
-            return location[0].parameter
-
-        return '/'
+            self._apps[app_name] = get_app_info(repository_name, self.config, self.settings, self._manager.dict())
 
     def _check_app_status(self, app, loop=False):
         checked = False
@@ -212,21 +226,16 @@ fe / frontend - Run `make frontend-build` against specified apps*
                 error_msg = 'Process has gone away'
                 break
 
+            elif self._attached_app and self._attached_app['name'] == app['name']:
+                status = STATUS_ATTACHED
+
             else:
                 try:
-                    # Find ports bound by the above processes and check /_status endpoints.
-                    parent = psutil.Process(app['process'])
-
-                    child = parent.children()[0].children()[0] if app['nix'] else parent.children()[0]
-
-                    valid_conns = list(filter(lambda x: x.status == 'LISTEN', child.connections()))[0]
-
-                    base_url = 'http://{}:{}'.format(*valid_conns.laddr)
-                    prefix = self._get_status_endpoint_prefix(valid_conns.laddr[1])
-                    if prefix is None:
-                        return 'unknown', {'message': 'Nginx configuration not detected'}
-
-                    status_endpoint = urljoin(base_url, os.path.join(prefix, '_status'))
+                    status_endpoint = 'http://{server}:{port}{endpoint}'.format(
+                            server=self.settings['server'],
+                            port=self.settings['repositories'][app['repo_name']]['healthcheck']['port'],
+                            endpoint=self.settings['repositories'][app['repo_name']]['healthcheck']['endpoint'],
+                    )
 
                     # self.print_out('Checking status for {} at {}'.format(app['name'], status_endpoint))
                     res = requests.get(status_endpoint)
@@ -234,37 +243,32 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
                     return data['status'], data
 
+                except requests.exceptions.ConnectionError:
+                    time.sleep(0.5)
+
                 except json.decoder.JSONDecodeError as e:
                     status = 'unknown'
                     error_msg = 'Invalid data retrieved from /_status endpoint'
-                    break
-
-                except ValueError as e:
-                    error_msg = 'Process does not exist or has crashed'
-                    break
-
-                except IndexError as e:
-                    error_msg = 'Process launched but not yet bound to port'
-                    time.sleep(0.5)
-
-                except (ProcessLookupError, psutil.NoSuchProcess) as e:
-                    error_msg = 'Process has gone away'
                     break
 
             checked = True
 
         return status, {'message': error_msg}
 
-    def _ensure_repos_up(self, repos, quiet=False):
+    def _ensure_apps_up(self, repository_names, quiet=False):
         down_apps = set()
 
-        for repo in repos:
-            app_name = get_app_name(repo)
+        for repository_name in repository_names:
+            app_name = self._get_app_name(repository_name)
+
+            if self._attached_app and self._attached_app['name'] == app_name:
+                continue
+
             if not quiet:
                 self.print_out('Checking {} ...'.format(app_name))
 
             self._suppress_log_printing = quiet
-            result, data = self._check_app_status(self.apps[app_name], loop=True)
+            result, data = self._check_app_status(self._apps[app_name], loop=True)
             self._suppress_log_printing = False
 
             if not data or 'status' not in data or data['status'] != 'ok':
@@ -272,161 +276,183 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
                 down_apps.add(app_name)
 
+        time.sleep(0.1)  # TODO: remove dirty hack.
+
         return down_apps
 
-    def _process_logs(self):
-        while not self.log_processor_shutdown.is_set():
-            log_job = self.log_queue.get()
-            log_entry = log_job['log']
-            log_name = log_job.get('name', 'manager')
+    def logger(self, log_entry, log_name=None, log_attach=None, end=os.linesep):
+        if self._suppress_log_printing:
+            return
 
-            if self._suppress_log_printing:
-                continue
+        if not log_name or log_attach is not None:
+            log_name = self._main_log_name
 
-            if self._filter_logs and log_name and log_name not in self._filter_logs:
-                continue
+        if self._filter_logs and log_name and log_name not in self._filter_logs:
+            return
 
-            self.print_out(log_entry, app_name=log_name)
-
+        if self.config.get('logging', {}).get('save-to-disk', False):
             for f in ['combined.log', '{}.log'.format(log_name)]:
-                with open(os.path.join(DMRunner.LOGGING_DIR, f), 'a') as outfile:
-                    outfile.write('{}\n'.format(log_entry))
+                filepath = os.path.join(os.path.realpath('.'), self.config['logging']['directory'], f)
+                with open(filepath, 'a') as log_file:
+                    log_file.write('{}{}'.format(repr(log_entry), end))
 
-            self.log_queue.task_done()
+        self.print_out(log_entry, app_name=log_name, end=end)
 
-    def _find_matching_apps(self, selectors):
+    def _find_matching_apps(self, selectors: Optional[List] = None) -> Tuple[str]:
         if not selectors:
-            found_apps = self.apps.keys()
+            found_apps = self._apps.keys()
         else:
             found_apps = []
             for selector in selectors:
                 found_app = None
-                for app_name, app_process in self.apps.items():
+                for app_name, app_process in self._apps.items():
                     if selector in app_name and app_name not in found_apps:
                         found_app = app_name if not found_app or len(app_name) < len(found_app) else found_app
 
                 if found_app:
                     found_apps.append(found_app)
-                elif selectors != '':
+                elif selectors:
                     self.print_out('Unable to find an app matching "{}".'.format(selector))
 
         return tuple(found_apps)
 
-    def _download_repos(self):
-        matching_repos = {}
-        res = None
-        page = 1
+    def _start_services(self):
+        docker_compose_filepath = os.path.join(os.path.realpath('.'), self.settings['docker-compose-filepath'])
+        self._dmservices = DMServices(logger=self.logger, docker_compose_filepath=docker_compose_filepath)
+        self._dmservices.blocking_healthcheck(self._shutdown)
 
-        retcode = subprocess.call(['ssh', '-T', 'git@github.com'])
-
-        if retcode != 1:
-            self.print_out('Unable to continue - authentication with Github failed.')
-        else:
-            self.print_out('Authentication to Github succeeded.')
-
-        self.print_out('Locating Digital Marketplace repositories...')
-        while res is None or res.links.get('next', {}).get('url', None):
-            page += 1
-            res = requests.get('https://api.github.com/orgs/alphagov/repos?per_page=100&page={}'.format(page))
-            if res.status_code != 200:
-                print(res)
-                print(res.text)
-
-            repos = json.loads(res.text)
-            for repo in repos:
-                for pattern in DMRunner.DM_REPO_PATTERNS:
-                    if pattern.match(repo['name']):
-                        app_name = get_app_name(repo['name'])
-                        self.print_out('Found {} '.format(app_name))
-                        matching_repos[app_name] = {'url': repo['html_url']}
-
-        for repo_name, repo_details in matching_repos.items():
-            self.print_out('Cloning {} ...'.format(repo_name))
-            retcode = subprocess.call(['git', 'clone', repo_details['url']], cwd=DMRunner.REPO_DIR)
-            if retcode != 0:
-                self.print_out('Problem cloning {} - errcode {}'.format(repo_name, retcode))
-
-        self.print_out('Done')
 
     def _stylize(self, text, **styles):
         style_string = ''.join(getattr(colored, key)(val) for key, val in styles.items())
         return colored.stylize(text, style_string)
 
-    def print_out(self, msgs, app_name='manager'):
-        if self._awaiting_input:
+    def _get_cleaned_wrapped_and_styled_text(self, text, app_name):
+        def pad_name(name):
+            return r'{{:>{}s}}'.format(self._app_name_width).format(name)
+
+        if type(text) != str:
+            text = repr(text)
+
+        cleaned_lines = []
+        wrapped_lines = []
+        styled_lines = []
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        padded_app_name = pad_name(app_name)
+        log_styling = self.config.get('styling', {}).get('logs', {})
+        colored_app_name = re.sub(app_name,
+                                  self._stylize(app_name,
+                                                **log_styling.get(app_name, {})),
+                                  padded_app_name)
+
+        for line in text.split('\n'):
+            datetime_prefixed_log_pattern = (
+                r'^(?:\) )?\d{{4}}-\d{{2}}-\d{{2}}[\sT]\d{{2}}:\d{{2}}:\d{{2}}(?:,\d{{3}})?\s{}\s'.format(app_name)
+            )
+
+            if re.match(datetime_prefixed_log_pattern, line):
+                line = re.sub(datetime_prefixed_log_pattern, '', line)
+
+                # TODO: Bit of a hack - any log that starts with a datetime from a given app is assumed to be 'breaking
+                # TODO: out' of PDB, if the user is currently attached.
+                if self._attached_app and self._attached_app['name'] == app_name:
+                    self._attached_app['attached'] = False
+                    cleaned_lines.append((pad_name(self._main_log_name), 'Detaching from {} ...'.format(app_name)))
+
+            cleaned_lines.append((colored_app_name, line))
+
+        for log_name, line in cleaned_lines:
+            # We sort colorize keys by length to ensure partial matches do not override longer matches (eg 'api'
+            # being highlighted rather than 'search-api').
+            for key in sorted(log_styling.keys(), key=lambda x: len(x), reverse=True):
+                line = re.sub(r'([\s-]){}\s'.format(key), '\\1{} '.format(
+                        self._stylize(key, **log_styling.get(key, {}))), line)
+
+            line = re.sub(r'(WARN(?:ING)?|ERROR)', self._stylize(r'\1', fg='yellow'), line)
+            line = re.sub(r' "((?:API (?:request )?)?GET|PUT|POST|DELETE)',
+                          ' "{}'.format(self._stylize(r'\1', fg='white')), line)
+
+            styled_lines.append((log_name, line))
+
+        for log_name, line in styled_lines:
+            terminal_width = shutil.get_terminal_size().columns - (len(timestamp) + self._app_name_width + 4)
+
+            try:
+                lines = ansiwrap.ansi_terminate_lines(
+                        ansiwrap.wrap(line,
+                                      width=terminal_width,
+                                      subsequent_indent=' ' * self.config.get('logging', {}).get('wrap-line-indent', 0),
+                                      drop_whitespace=False)
+                )
+
+            except ValueError:  # HACK: Problem decoding some ansi codes from Docker, so just wrap them ignorantly.
+                lines = textwrap.wrap(line,
+                                      width=terminal_width,
+                                      subsequent_indent=' ' * self.config.get('logging', {}).get('wrap-line-indent', 0),
+                                      drop_whitespace=False)
+
+            log_prefix = '{} {}'.format(timestamp, log_name)
+            lines = ['{} | {}'.format(log_prefix, line) for line in lines]
+
+            wrapped_lines.extend(lines)
+
+        return wrapped_lines
+
+    def print_out(self, text, app_name=None, end=os.linesep):
+        if not app_name:
+            app_name = self._main_log_name
+
+        if self._awaiting_input or self._attached_app:
             # We've printed a prompt - let's overwrite it.
             sys.stdout.write('{}{}'.format(TERMINAL_CARRIAGE_RETURN, TERMINAL_ESCAPE_CLEAR_LINE))
 
-        for msg in msgs.split('\n'):
-            datetime_prefixed_log_pattern = r'^\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}\s{}\s'.format(app_name)
+        lines = self._get_cleaned_wrapped_and_styled_text(text, app_name)
+        for i, line in enumerate(lines, start=1):
+            # This should be the ONLY direct call to print - everything else should go through this `print_out`.
+            print('{}{}'.format(TERMINAL_CARRIAGE_RETURN, line), flush=True, end=end if i == len(lines) else os.linesep)
 
-            if re.match(datetime_prefixed_log_pattern, msg):
-                msg = re.sub(datetime_prefixed_log_pattern, '', msg)
-
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-            padded_app_name = r'{{:>{}s}}'.format(self._app_name_width).format(app_name)
-            colored_app_name = re.sub(app_name,
-                                      self._stylize(app_name, **self.config['styles'].getdict(app_name, fallback={})),
-                                      padded_app_name)
-            log_prefix = '{} {}'.format(timestamp, colored_app_name)
-
-            terminal_width = shutil.get_terminal_size().columns - (len(timestamp) + self._app_name_width + 4)
-            msgs = [msg[x:x + terminal_width] for x in range(0, len(msg), terminal_width)]
-
-            for key in self.config['styles'].keys():
-                msgs = [re.sub(r'\s{}\s'.format(key), ' {} '.format(
-                    self._stylize(key, **self.config['styles'].getdict(key, fallback={}))), msg) for msg in msgs]
-
-            for msg in msgs:
-                msg = re.sub(r'(WARN(?:ING)?)', self._stylize(r'\1', fg='yellow'), msg)
-                msg = re.sub(r'(ERROR)', self._stylize(r'\1', fg='yellow'), msg)
-                print('{} | {}'.format(log_prefix, msg), flush=True)
-                log_prefix = '{} {}'.format(timestamp, ' ' * len(padded_app_name))
-
-        if self._awaiting_input and not self._shutdown:
-            # We cleared the prompt before dispalying the log line; we should show the prompt (and any input) again.
-            sys.stdout.write('{}{}'.format(DMRunner.INPUT_STRING, readline.get_line_buffer()))
+        # We cleared the prompt before displaying the log line; we should show the prompt (and any input) again.
+        if not self._shutdown.is_set() and (self._attached_app or self._awaiting_input):
+            sys.stdout.write('{} {}'.format(self._prompt_string, readline.get_line_buffer()))
             sys.stdout.flush()
 
-    def run_single_repository(self, app):
-        # We are here if the script is booting up. If run_all was supplied, we should run-all for the initial run.
-        self._processes[app['name']] = DMProcess(app, self.log_queue)
-
-        if app['rebuild']:
-            self.print_out('Running {}-build...'.format(self._stylize(app['name'], attr='bold')))
-            # self._processes['{}-build'.format(app['name'])] = DMProcess(app, log_queue)
-
     def run(self):
-        atexit.register(self.cmd_kill_apps, silent_fail=True)
+        # Make sure everything gets cleaned up properly, even in the event of a crash.
+        atexit.register(self.shutdown)
 
         try:
-            if self.download:
-                self._download_repos()
-                return
+            if self._use_docker_services:
+                self._start_services()
 
-            down_apps = set()
+            if not self._shutdown.is_set():
+                down_apps = set()
 
-            for repos in self._repositories:
-                for repo in repos:
-                    app_name = get_app_name(repo)
-                    self.run_single_repository(app=self.apps[app_name])
+                app_command = APP_COMMAND_REBUILD if self._rebuild else APP_COMMAND_RESTART
 
-                down_apps.update(self._ensure_repos_up(repos))
+                for repositories in self._app_repositories:
+                    for repository in repositories:
+                        app_name = self._get_app_name(repository)
+                        self._processes[app_name] = DMProcess(self._apps[app_name],
+                                                              logger=self.logger,
+                                                              app_command=app_command)
 
-            if not down_apps:
-                self.print_out('All apps up and running: {}  '.format(' '.join(self.apps.keys())))
-            else:
-                self.print_out('There were some problems bringing up the full DM app suite.')
+                    down_apps.update(self._ensure_apps_up(repositories))
 
-            self.cmd_apps_status()
+                if not down_apps:
+                    self.print_out('All apps up and running: {}  '.format(' '.join(self._apps.keys())))
+                else:
+                    self.print_out('There were some problems bringing up the full DM app suite.')
+
+                self.cmd_apps_status()
 
         except KeyboardInterrupt:
-            self._shutdown = True
+            self.shutdown()
 
-        self.process_input()
+        else:
+            self._get_input_and_pipe_to_target()
+            self.shutdown()
 
 
-    def cmd_switch_logs(self, selectors):
+    def cmd_switch_logs(self, selectors: list):
         if not selectors:
             self._filter_logs = []
             self.print_out('New logs coming in from all apps will be interleaved together.\n\n')
@@ -446,21 +472,25 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         self._suppress_log_printing = True
 
-        for app_name, app in self.apps.items():
+        for app_name, app in self._apps.items():
             status, data = self._check_app_status(app)
 
             ppid = str(app['process']) if app['process'] > 0 else 'N/A'
             status = status.upper()
-            log_status = 'visible' if not self._filter_logs or app_name in self._filter_logs else 'hidden'
+            logging = 'visible' if not self._filter_logs or app_name in self._filter_logs else 'hidden'
             notes = data.get('message', data) if status != 'OK' else ''
 
-            status_style = {'fg': 'green'} if status == 'OK' else {'fg': 'red'} if status == 'DOWN' else {}
-            log_status_style = {'fg': 'green'} if log_status == 'visible' else {'fg': 'red'}
+            styling = self.config['styling']
+            status_style = styling['status'][status] if status in styling['status'].keys() else {}
+            logging_style = styling['filter'][logging] if logging in styling['filter'].keys() else {}
 
             status = self._stylize(status, **status_style)
-            log_status = self._stylize(log_status, **log_status_style)
+            logging = self._stylize(logging, **logging_style)
 
-            status_table.add_row([app_name, ppid, status, log_status, notes])
+            status_table.add_row([app_name, ppid, status, logging, notes])
+
+        # A dirty hack to 'ensure' (in most realistic cases) that all logs from the requests have been processed.
+        time.sleep(0.25)
 
         self._suppress_log_printing = False
 
@@ -473,7 +503,7 @@ fe / frontend - Run `make frontend-build` against specified apps*
         branches_table.align['BRANCH'] = 'l'
         branches_table.align['LAST COMMIT'] = 'r'
 
-        for app_name, app in self.apps.items():
+        for app_name, app in self._apps.items():
             try:
                 branch_name = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
                                                       cwd=app['repo_path'], universal_newlines=True).strip()
@@ -495,15 +525,16 @@ fe / frontend - Run `make frontend-build` against specified apps*
 
         self.print_out(branches_table.get_string())
 
-    def cmd_restart_down_apps(self, selectors, remake=False):
+    def cmd_restart_down_apps(self, selectors: list, rebuild: bool = False) -> None:
         matched_apps = self._find_matching_apps(selectors)
         recovered_apps = set()
         failed_apps = set()
 
-        for repos in self._repositories:
+        for repos in self._app_repositories:
             for repo in repos:
-                app_name = get_app_name(repo)
-                app = self.apps[app_name]
+                need_restart = False
+                app_name = self._get_app_name(repo)
+                app = self._apps[app_name]
 
                 if app_name not in matched_apps:
                     continue
@@ -512,35 +543,47 @@ fe / frontend - Run `make frontend-build` against specified apps*
                     p = psutil.Process(app['process'])
                     assert p.cwd() == app['repo_path']
 
-                except (ProcessLookupError, psutil.NoSuchProcess, KeyError, AssertionError, ValueError):
-                    self.print_out('The {} is DOWN. Restarting ...'.format(app_name))
-                    try:
-                        self._processes[app_name].run(remake=remake)
-                        recovered_apps.add(app_name)
-                    except:
-                        self.print_out('Could not re-run {} ...'.format(app_name))
+                    if rebuild and selectors:
+                        self.cmd_kill_apps(selectors, silent_fail=True)
+                        need_restart = True
 
-            failed_apps.update(self._ensure_repos_up(filter(lambda x: get_app_name(x) in recovered_apps, repos)))
+                except (ProcessLookupError, psutil.NoSuchProcess, KeyError, AssertionError, ValueError):
+                    need_restart = True
+
+                if need_restart:
+                    try:
+                        self.print_out('{} the {} ...'.format('Rebuilding' if rebuild else 'Restarting', app_name))
+                        self._processes[app_name].run(APP_COMMAND_REBUILD if rebuild else APP_COMMAND_RESTART)
+                        recovered_apps.add(app_name)
+
+                    except Exception as e:
+                        self.print_out('Could not re{} {}: {} ...'.format('build' if rebuild else 'start', app_name, e))
+
+            failed_apps.update(self._ensure_apps_up(filter(lambda x: self._get_app_name(x) in recovered_apps, repos)))
 
         recovered_apps -= failed_apps
 
         if failed_apps:
             self.print_out('These apps could not be recovered: {} '.format(' '.join(failed_apps)))
-            if not remake:
-                self.print_out('Try `remake` to launch using `make run-all`')
 
-        if recovered_apps and len(recovered_apps) < len(self.apps.keys()):
+            if not rebuild:
+                self.print_out(yellow('Try rebuilding the app(s) to refresh cached assets using `rebuild`.'))
+
+        if recovered_apps and len(recovered_apps) < len(self._apps.keys()):
             self.print_out('These apps are back up and running: {}  '.format(' '.join(recovered_apps)))
 
-        if not failed_apps and len(recovered_apps) == len(self.apps.keys()):
+        if not failed_apps and len(recovered_apps) == len(self._apps.keys()):
             self.print_out('All apps up and running: {}  '.format(' '.join(recovered_apps)))
 
-    def cmd_kill_apps(self, selectors='', silent_fail=False):
+    def cmd_kill_apps(self, selectors: Optional[List] = None, silent_fail: bool=False) -> None:
         procs = []
 
         for app_name in self._find_matching_apps(selectors):
             try:
-                p = psutil.Process(self.apps[app_name]['process'])
+                if self._apps[app_name]['process'] in (PROCESS_TERMINATED, PROCESS_NOEXIST):
+                    continue
+
+                p = psutil.Process(self._apps[app_name]['process'])
                 procs.append(p)
 
                 children = []
@@ -562,73 +605,88 @@ fe / frontend - Run `make frontend-build` against specified apps*
         for proc in procs:
             proc.wait()
 
-    def cmd_frontend_build(self, selectors=''):
+    def cmd_kill_services(self) -> None:
+        if not self._dmservices:
+            return
+
+        healthcheck_result, service_results = self._dmservices.services_healthcheck(self._shutdown, check_once=True)
+
+        if self._use_docker_services and healthcheck_result is True:
+            self.print_out('Stopping background services...')
+            self._dmservices.wait(interrupt=True)
+            self.print_out('Background services have stopped.')
+
+    def cmd_frontend_build(self, selectors: Optional[List] = None) -> None:
         for app_name in self._find_matching_apps(selectors):
             if app_name.endswith('-frontend'):
                 app_build_name = app_name.replace('frontend', 'fe-build')
-                app_build = self.apps[app_name].copy()
+                app_build = self._apps[app_name].copy()
                 app_build['name'] = app_build_name
 
-                if app_build_name not in self.config['styles'].keys():
-                    self.config['styles'][app_build_name] = self.config['styles'].get(app_name)
+                colorize = self.config['styling']['logs']
+                if app_name in colorize.keys() and app_build_name not in colorize.keys():
+                    colorize[app_build_name] = colorize[app_name]
 
                 # Ephemeral process to run the frontend-build. Not tracked.
-                DMProcess(app_build, self.log_queue)
+                DMProcess(app_build, logger=self.logger, app_command=APP_COMMAND_FRONTEND)
 
             self.print_out('Starting frontend-build on {} '.format(app_name))
 
-    def process_input(self):
+    def shutdown(self):
+        # Ignore further sigints so that everything wraps up properly.
+        # There's a small chance this makes it a real PITA to kill the app though...
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        shutdown_set = self._shutdown.is_set()
+        self._shutdown.set()
+
+        if not shutdown_set:
+            self.print_out('Wrapping up ...')
+
+        self.cmd_kill_apps([])
+        self.cmd_kill_services()
+
+        if not shutdown_set:
+            self.print_out('Goodbye!')
+
+    def process_input(self, user_input):
         """Takes input from user and performs associated actions (e.g. switching log views, restarting apps, shutting
         down)"""
-        while True:
-            try:
-                if self._shutdown:
-                    self.print_out('Shutting down...')
-                    self.log_processor_shutdown.set()
-                    self.cmd_kill_apps()
-                    return
+        try:
+            words: List[str] = user_input.split(' ')
+            verb: str = words[0]
 
-                self._awaiting_input = True
-                command = input(DMRunner.INPUT_STRING).lower().strip()
-                self._awaiting_input = False
+            if verb == 'h' or verb == 'help':
+                print(DMRunner.HELP_SYNTAX, flush=True)
+                print('')
 
-                words = command.split(' ')
-                verb = words[0]
+            elif verb == 's' or verb == 'status':
+                self.cmd_apps_status()
 
-                if verb == 'h' or verb == 'help':
-                    print(DMRunner.HELP_SYNTAX, flush=True)
-                    print('')
+            elif verb == 'b' or verb == 'branch' or verb == 'branches':
+                self.cmd_apps_branches()
 
-                elif verb == 's' or verb == 'status':
-                    self.cmd_apps_status()
+            elif verb == 'r' or verb == 'restart':
+                self.cmd_restart_down_apps(words[1:])
 
-                elif verb == 'b' or verb == 'branch' or verb == 'branches':
-                    self.cmd_apps_branches()
+            elif verb == 'rb' or verb == 'rebuild':
+                self.cmd_restart_down_apps(words[1:], rebuild=True)
 
-                elif verb == 'r' or verb == 'restart':
-                    self.cmd_restart_down_apps(words[1:])
+            elif verb == 'k' or verb == 'kill':
+                self.cmd_kill_apps(words[1:])
 
-                elif verb == 'rm' or verb == 'remake':
-                    self.cmd_restart_down_apps(words[1:], remake=True)
+            elif verb == 'q' or verb == 'quit':
+                self.shutdown()
 
-                elif verb == 'k' or verb == 'kill':
-                    self.cmd_kill_apps(words[1:])
+            elif verb == 'f' or verb == 'filter':
+                self.cmd_switch_logs(words[1:])
 
-                elif verb == 'q' or verb == 'quit':
-                    self._shutdown = True
+            elif verb == 'fe' or verb == 'frontend':
+                self.cmd_frontend_build(words[1:])
 
-                elif verb == 'f' or verb == 'filter':
-                    self.cmd_switch_logs(words[1:])
+            else:
+                self.print_out('')
 
-                elif verb == 'fe' or verb == 'frontend':
-                    self.cmd_frontend_build(words[1:])
-
-                else:
-                    self.print_out('')
-
-            except KeyboardInterrupt:
-                self._shutdown = True
-
-            except Exception as e:
-                self.print_out('Exception handling command.')
-                self.print_out(e)
+        except Exception as e:
+            self.print_out('Exception handling user input.')
+            self.print_out(e)

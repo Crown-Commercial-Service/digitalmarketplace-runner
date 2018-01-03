@@ -1,34 +1,39 @@
 #!/usr/bin/env python
 
 import argparse
-from dmrunner.runner import DMRunner
+from dmrunner.runner import DMRunner, RUNNER_COMMANDS
 
 """
 TODO:
-* old repos without run-all break everything
-* nginx bootstrapping
 * Proper logging
 * Implement --rebuild to run secondary processes for frontend-build:watch on frontend apps
 * Big ol' refactor
 * nix-shell can't clone repos at the moment
-* better config management via configparser
- * eg for colours, filters
-* make this command-line accessible from anywhere via eg 'dmrunner' command
+
+Run functional tests at end of setup
+
+Get rid of self._apps (should be part of DMProcess)
+
+Refactor DMService/DMProcess overlap
 """
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--download', action='store_true', help='Download main digitalmarketplace repositories.')
-    parser.add_argument('--all', '-a', action='store_true', help='Use `run-all` for each repo rather than `run-app`.')
-    parser.add_argument('--rebuild', '-r', action='store_true', help='Also run frontend-build:watch for frontend '
-                                                                     'repositories.')
-    parser.add_argument('--nix', action='store_true', help='Run all apps inside their respective nix-shell '
-                                                           'environments.')
+    parser.add_argument('--rebuild', '-r', action='store_true',
+                        help='Do a rebuild for all apps (equivalent to using `make run-all`). This will take '
+                             'longer on initial startup but will help to ensure everything is in the best state.')
+    parser.add_argument('--config-path', '-c', type=str, default='config/config.yml',
+                        help='Path to your configuration file, which will be created from the example config if it does'
+                             'not already exist (default: config/config.yml).')
+    parser.add_argument('command', type=str, default='run', choices=RUNNER_COMMANDS,
+                        help="'config': Creates a local copy of configuration for you to edit.\n"
+                             " 'setup': Performs setup and checks that your environment meets DM requirements.\n"
+                             "   'run': Run the Digital Marketplace (default)")
 
     args = parser.parse_args()
 
-    runner = DMRunner(download=args.download, run_all=args.all, rebuild=args.rebuild, nix=args.nix)
+    runner = DMRunner(command=args.command.lower(), rebuild=args.rebuild, config_path=args.config_path)
     runner.run()
 
 

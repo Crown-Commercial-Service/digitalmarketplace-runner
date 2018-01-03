@@ -8,28 +8,28 @@ virtualenv:
 
 .PHONY: install
 install: virtualenv
-	${VIRTUALENV_ROOT}/bin/pip install .
+	${VIRTUALENV_ROOT}/bin/pip install -r requirements.txt 
 
-.PHONY: uninstall
-uninstall:
-	${VIRTUALENV_ROOT}/bin/pip install dmrunner
+.PHOHY: config
+config: install
+	${VIRTUALENV_ROOT}/bin/python main.py config
 
-.PHONY: download
-download: install
-	${VIRTUALENV_ROOT}/bin/python main.py --download
+.PHOHY: setup
+setup: install
+	${VIRTUALENV_ROOT}/bin/python main.py setup
 
 .PHONY: run
-run: install
-	${VIRTUALENV_ROOT}/bin/python main.py ${ARGS}
+run: virtualenv
+	${VIRTUALENV_ROOT}/bin/python main.py ${ARGS} run
 
-.PHONY: all
-run-all: install
-	${VIRTUALENV_ROOT}/bin/python main.py --all ${ARGS}
+.PHONY: rebuild
+rebuild: virtualenv
+	${VIRTUALENV_ROOT}/bin/python main.py --rebuild ${ARGS} run
 
 .PHONY: nix
-nix: install
-	${VIRTUALENV_ROOT}/bin/python main.py --nix ${ARGS}
+nix: virtualenv
+	${VIRTUALENV_ROOT}/bin/python main.py --nix ${ARGS} run
 
-.PHONY: nix-all
-nix-all: install
-	${VIRTUALENV_ROOT}/bin/python main.py --nix --all ${ARGS}
+.PHONY: nix-rebuild
+nix-rebuild: virtualenv
+	${VIRTUALENV_ROOT}/bin/python main.py --nix --rebuild ${ARGS} run
