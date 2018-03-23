@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 
 import argparse
+import os
+import re
+import subprocess
+import sys
+import yaml
 from dmrunner.runner import DMRunner, RUNNER_COMMANDS
 
 """
@@ -32,6 +37,27 @@ def main():
                              "   'run': Run the Digital Marketplace (default)")
 
     args = parser.parse_args()
+
+    aws_access_key_id = subprocess.check_output('aws configure get aws_access_key_id'.split(), universal_newlines=True)
+    aws_secret_access_key = subprocess.check_output('aws configure get aws_secret_access_key'.split(),
+                                                    universal_newlines=True)
+
+    path_to_credentials = os.getenv('DM_CREDENTIALS_REPO')
+    if not path_to_credentials:
+        print('You must define the environment variable DM_CREDENTIALS_REPO.')
+        sys.exit(1)
+
+    all_creds = yaml.safe_load(subprocess.check_output(f'{path_to_credentials}/sops-wrapper '
+                                                       f'-d {path_to_credentials}/vars/preview.yaml'.split(),
+                                                       universal_newlines=True))
+
+    mandrill_key = all_creds['shared_tokens']['mandrill_key']
+    notify_key = all_creds['notify_api_key']
+
+    os.environ['AWS_ACCESS_KEY_ID'] = aws_access_key_id
+    os.environ['AWS_SECRET_ACCESS_KEY'] = aws_secret_access_key
+    os.environ['DM_MANDRILL_API_KEY'] = mandrill_key
+    os.environ['DM_NOTIFY_API_KEY'] = notify_key
 
     runner = DMRunner(command=args.command.lower(), rebuild=args.rebuild, config_path=args.config_path)
     runner.run()
