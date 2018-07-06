@@ -5,7 +5,6 @@ import ansicolor
 from contextlib import contextmanager
 import getpass
 import os
-import psycopg2
 import re
 import requests
 import pexpect
@@ -94,10 +93,10 @@ class DMServices(DMExecutable):
 
                 # Connect to Postgres with default parameters - assume a successful connection means postgres is up.
                 try:
-                    psycopg2.connect(dbname='digitalmarketplace', user=getpass.getuser(), host='localhost').close()
+                    subprocess.run(['pg_isready', '-d', 'digitalmarketplace', '-U', getpass.getuser(), '-h', 'localhost'], check=True)
                     healthcheck_result['postgres'] = True
 
-                except psycopg2.OperationalError:
+                except subprocess.CalledProcessError:
                     healthcheck_result['postgres'] = False
 
                 if all(healthcheck_result.values()):
