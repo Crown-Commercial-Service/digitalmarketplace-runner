@@ -146,14 +146,6 @@ index:
         create-with-mapping: services-g-cloud-10
 
     - positional:
-        - services
-        - dev
-      keyword:
-        frameworks: g-cloud-9
-        index: g-cloud-9
-        create-with-mapping: services
-
-    - positional:
         - briefs
         - dev
       keyword:
