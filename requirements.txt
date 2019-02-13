@@ -6,7 +6,7 @@ configobj==5.0.6
 docker==2.7.0
 mypy==0.641
 pexpect==4.3.1
-prettytable==0.7.2
+prettytable==7
 psutil==5.2.2
 psycopg2==2.7.3.2
 pyflakes==2.0.0
