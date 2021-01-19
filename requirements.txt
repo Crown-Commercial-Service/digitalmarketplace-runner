@@ -1,7 +1,7 @@
 ansicolor==0.2.6
 ansiwrap==0.8.4
 black==20.8b1
-boto3==1.16.6
+boto3==1.16.56
 colored==1.4.2
 configobj==5.0.6
 docker==4.4.1
