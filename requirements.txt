@@ -160,7 +160,7 @@ typed-ast==1.4.3
     # via
     #   black
     #   mypy
-types-pyyaml==5.4.6
+types-pyyaml==5.4.7
     # via -r requirements.in
 types-redis==3.5.6
     # via -r requirements.in
