@@ -162,7 +162,7 @@ typed-ast==1.4.3
     #   mypy
 types-pyyaml==5.4.10
     # via -r requirements.in
-types-redis==3.5.9
+types-redis==3.5.11
     # via -r requirements.in
 types-requests==2.25.9
     # via -r requirements.in
