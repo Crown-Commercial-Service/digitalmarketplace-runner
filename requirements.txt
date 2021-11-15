@@ -147,7 +147,7 @@ tomli==1.1.0
     # via black
 types-pyyaml==6.0.0
     # via -r requirements.in
-types-redis==3.5.15
+types-redis==3.5.16
     # via -r requirements.in
 types-requests==2.25.11
     # via -r requirements.in
