@@ -149,7 +149,7 @@ types-pyyaml==6.0.1
     # via -r requirements.in
 types-redis==4.0.3
     # via -r requirements.in
-types-requests==2.26.1
+types-requests==2.26.2
     # via -r requirements.in
 typing-extensions==3.10.0.2
     # via
