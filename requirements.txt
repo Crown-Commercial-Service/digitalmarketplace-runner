@@ -14,9 +14,9 @@ bcrypt==3.2.0
     # via paramiko
 black==21.12b0
     # via -r requirements.in
-boto3==1.20.23
+boto3==1.20.27
     # via -r requirements.in
-botocore==1.23.23
+botocore==1.23.27
     # via
     #   boto3
     #   s3transfer
@@ -115,7 +115,7 @@ pyyaml==5.4.1
     #   docker-compose
 redis==4.0.2
     # via -r requirements.in
-requests==2.26.0
+requests==2.27.0
     # via
     #   -r requirements.in
     #   docker
