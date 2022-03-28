@@ -136,6 +136,7 @@ six==1.15.0
     #   configobj
     #   dockerpty
     #   jsonschema
+    #   paramiko
     #   pynacl
     #   python-dateutil
     #   websocket-client
@@ -153,7 +154,7 @@ types-pyyaml==6.0.4
     # via -r requirements.in
 types-redis==4.1.17
     # via -r requirements.in
-types-requests==2.27.13
+types-requests==2.27.15
     # via -r requirements.in
 types-urllib3==1.26.3
     # via types-requests
