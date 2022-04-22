@@ -156,7 +156,7 @@ types-pyyaml==6.0.6
     # via -r requirements.in
 types-redis==4.1.21
     # via -r requirements.in
-types-requests==2.27.13
+types-requests==2.27.20
     # via -r requirements.in
 types-urllib3==1.26.3
     # via types-requests
