@@ -73,7 +73,7 @@ jmespath==0.10.0
     #   botocore
 jsonschema==3.2.0
     # via docker-compose
-mypy==0.960
+mypy==0.961
     # via -r requirements.in
 mypy-extensions==0.4.3
     # via
@@ -154,7 +154,7 @@ tomli==1.1.0
     #   mypy
 types-pyyaml==6.0.7
     # via -r requirements.in
-types-redis==4.2.6
+types-redis==4.3.10
     # via -r requirements.in
 types-requests==2.27.29
     # via -r requirements.in
