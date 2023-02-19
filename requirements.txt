@@ -43,7 +43,7 @@ colored==1.4.4
     #   digitalmarketplace-developer-tools
 configobj==5.0.6
     # via -r requirements.in
-cryptography==3.4.7
+cryptography==39.0.1
     # via paramiko
 digitalmarketplace-developer-tools==1.0.2
     # via -r requirements.in
