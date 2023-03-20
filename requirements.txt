@@ -14,7 +14,7 @@ attrs==20.3.0
     # via jsonschema
 bcrypt==3.2.0
     # via paramiko
-black==22.12.0
+black==23.1.0
     # via -r requirements.in
 boto3==1.24.22
     # via -r requirements.in
@@ -79,8 +79,10 @@ mypy-extensions==0.4.3
     # via
     #   black
     #   mypy
-packaging==21.3
-    # via build
+packaging==23.0
+    # via
+    #   black
+    #   build
 paramiko==2.10.1
     # via docker
 pathspec==0.9.0
@@ -107,8 +109,6 @@ pyflakes==3.0.1
     # via -r requirements.in
 pynacl==1.4.0
     # via paramiko
-pyparsing==3.0.6
-    # via packaging
 pyrsistent==0.17.3
     # via jsonschema
 python-dateutil==2.8.1
