@@ -121,7 +121,7 @@ pyyaml==5.4.1
     #   docker-compose
 redis==4.5.1
     # via -r requirements.in
-requests==2.28.2
+requests==2.31.0
     # via
     #   -r requirements.in
     #   docker
