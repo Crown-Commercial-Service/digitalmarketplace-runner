@@ -24,7 +24,7 @@ botocore==1.27.22
     #   s3transfer
 build==0.8.0
     # via pip-tools
-certifi==2022.12.7
+certifi==2023.7.22
     # via requests
 cffi==1.14.5
     # via
@@ -119,9 +119,9 @@ pyyaml==5.4.1
     # via
     #   -r requirements.in
     #   docker-compose
-redis==4.5.1
+redis==4.5.4
     # via -r requirements.in
-requests==2.28.2
+requests==2.31.0
     # via
     #   -r requirements.in
     #   docker
@@ -165,7 +165,7 @@ typing-extensions==3.10.0.2
     # via
     #   black
     #   mypy
-urllib3==1.26.5
+urllib3==1.26.18
     # via
     #   botocore
     #   requests
@@ -181,3 +181,4 @@ wheel==0.38.0
 # The following packages are considered to be unsafe in a requirements file:
 # pip
 # setuptools
+setuptools>=65.5.1 # not directly required, pinned by Snyk to avoid a vulnerability
