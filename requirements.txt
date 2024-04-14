@@ -61,7 +61,7 @@ docopt==0.6.2
     # via docker-compose
 gnureadline==8.1.2
     # via -r requirements.in
-idna==2.10
+idna==3.7
     # via requests
 invoke==1.7.3
     # via
