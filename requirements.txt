@@ -113,7 +113,7 @@ pyrsistent==0.17.3
     # via jsonschema
 python-dateutil==2.8.1
     # via botocore
-python-dotenv==0.17.0
+python-dotenv==1.2.2
     # via docker-compose
 pyyaml==5.4.1
     # via
